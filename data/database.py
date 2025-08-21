@@ -146,9 +146,22 @@ class Database:
             ts_code TEXT,
             qty REAL,
             cost REAL,
+            target_price REAL,
             PRIMARY KEY (portfolio_name, ts_code)
         )
         ''')
+
+        # Lightweight migration: add missing columns if upgrading from older schema
+        def _ensure_column(table: str, column: str, col_def: str):
+            try:
+                info = cursor.execute(f"PRAGMA table_info({table})").fetchall()
+                cols = {row[1] for row in info}
+                if column not in cols:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Failed to ensure column {table}.{column}: {e}")
+
+        _ensure_column('portfolio', 'target_price', 'REAL')
 
         # Portfolio daily value snapshots for accurate risk metrics
         cursor.execute('''

@@ -3,6 +3,7 @@ import sys
 import threading
 from datetime import datetime
 from tkinter import Tk, StringVar, IntVar, BooleanVar, END, messagebox, filedialog
+from tkinter import simpledialog
 from tkinter import ttk
 
 # Matplotlib embedding
@@ -368,23 +369,34 @@ class PortfolioTab(ttk.Frame):
             ttk.Label(trade_frame, text='数量：').grid(row=0, column=6, padx=(16, 6))
             self.trade_qty_var = StringVar()
             ttk.Entry(trade_frame, textvariable=self.trade_qty_var, width=10).grid(row=0, column=7)
-            ttk.Button(trade_frame, text='执行交易', command=self.execute_trade).grid(row=0, column=8, padx=(16, 6))
+            ttk.Label(trade_frame, text='目标价(价值止盈)：').grid(row=0, column=8, padx=(16, 6))
+            self.trade_target_var = StringVar()
+            ttk.Entry(trade_frame, textvariable=self.trade_target_var, width=10).grid(row=0, column=9)
+            ttk.Button(trade_frame, text='执行交易', command=self.execute_trade).grid(row=0, column=10, padx=(16, 6))
 
             # Report
             rep_frame = ttk.LabelFrame(self, text='投资组合概览')
             rep_frame.pack(fill='both', expand=True, padx=10, pady=8)
-            ttk.Button(rep_frame, text='刷新投资组合报告', command=self.refresh_report).pack(anchor='w', padx=8, pady=6)
+            btn_row = ttk.Frame(rep_frame)
+            btn_row.pack(fill='x')
+            ttk.Button(btn_row, text='刷新投资组合报告', command=self.refresh_report).pack(side='left', padx=8, pady=6)
+            ttk.Button(btn_row, text='编辑目标价', command=self.edit_target_price).pack(side='left')
             self.summary_var = StringVar(value='未生成报告')
             ttk.Label(rep_frame, textvariable=self.summary_var).pack(anchor='w', padx=8)
 
             # Positions table
-            self.pos_tree = ttk.Treeview(rep_frame, columns=('ts_code', 'name', 'qty', 'cost_price', 'current_price', 'market_value', 'pnl'), show='headings')
+            self.pos_tree = ttk.Treeview(rep_frame, columns=(
+                'ts_code', 'name', 'qty', 'cost_price', 'current_price', 'market_value', 'pnl',
+                'trailing_stop', 'ma20_stop', 'target_price'
+            ), show='headings')
             for col, text, w in [
                 ('ts_code', '股票代码', 120), ('name', '股票名称', 140), ('qty', '持仓数量', 90),
-                ('cost_price', '成本价', 80), ('current_price', '现价', 80), ('market_value', '市值', 100), ('pnl', '浮动盈亏', 100)
+                ('cost_price', '成本价', 80), ('current_price', '现价', 80), ('market_value', '市值', 100), ('pnl', '浮动盈亏', 100),
+                ('trailing_stop', '跟踪止盈价', 100), ('ma20_stop', '20日均线价', 100), ('target_price', '目标价', 100)
             ]:
                 self.pos_tree.heading(col, text=text)
                 self.pos_tree.column(col, width=w, anchor='center')
+            self.pos_tree.tag_configure('warn', foreground='red')
             self.pos_tree.pack(fill='both', expand=True, padx=8, pady=6)
 
             # Positions distribution chart (pie)
@@ -435,13 +447,19 @@ class PortfolioTab(ttk.Frame):
         try:
             price = float(price_txt)
             qty = float(qty_txt)
+            target_txt = self.trade_target_var.get().strip() if hasattr(self, 'trade_target_var') else ''
+            target_price = float(target_txt) if target_txt else None
         except ValueError:
             messagebox.showwarning('提示', '价格与数量需为数字')
             return
         side = 'buy' if self.trade_type_var.get() == '买入' else 'sell'
         ts_code_to_trade = to_ts_code(code_input)
         try:
-            self.app.pm.add_trade(side=side, ts_code=ts_code_to_trade, price=price, qty=qty)
+            # Enforce target price on buy if required
+            if side == 'buy' and (target_price is None or target_price <= 0):
+                messagebox.showwarning('提示', '买入时需填写有效的目标价（价值止盈）。')
+                return
+            self.app.pm.add_trade(side=side, ts_code=ts_code_to_trade, price=price, qty=qty, target_price=target_price)
             self.status.set(f"交易执行成功: {self.trade_type_var.get()} {qty} 股 {ts_code_to_trade}")
             self.refresh_report()
         except Exception as e:
@@ -458,11 +476,54 @@ class PortfolioTab(ttk.Frame):
         for item in self.pos_tree.get_children():
             self.pos_tree.delete(item)
         for p in rep['positions']:
+            cur = float(p.get('current_price') or 0)
+            ts = float(p.get('trailing_stop') or 0)
+            ma = float(p.get('ma20_stop') or 0)
+            tgt = float(p.get('target_price') or 0)
+            warn = any([
+                (ts > 0 and cur < ts),
+                (ma > 0 and cur < ma),
+                (tgt > 0 and cur < tgt),
+            ])
+            tags = ('warn',) if warn else ()
             self.pos_tree.insert('', END, values=(
                 p.get('ts_code'), p.get('name'), p.get('qty'),
-                f"{p.get('cost_price', 0):.2f}", f"{p.get('current_price', 0):.2f}",
-                f"{p.get('market_value', 0):.2f}", f"{p.get('pnl', 0):.2f}"
-            ))
+                f"{p.get('cost_price', 0):.2f}", f"{cur:.2f}",
+                f"{p.get('market_value', 0):.2f}", f"{p.get('pnl', 0):.2f}",
+                f"{ts:.2f}", f"{ma:.2f}", f"{tgt:.2f}"
+            ), tags=tags)
+
+    def edit_target_price(self):
+        try:
+            sel = self.pos_tree.selection()
+            if not sel:
+                messagebox.showinfo('提示', '请先选择一条持仓记录')
+                return
+            # Handle multiple selections one by one
+            updated = 0
+            for item in sel:
+                vals = self.pos_tree.item(item, 'values')
+                if not vals:
+                    continue
+                ts_code = vals[0]
+                current_target = vals[9] if len(vals) > 9 else ''
+                try:
+                    default_val = float(current_target) if str(current_target) not in ('', 'None') else None
+                except Exception:
+                    default_val = None
+                ans = simpledialog.askfloat('编辑目标价', f'{ts_code} 新的目标价：', initialvalue=default_val, minvalue=0.0)
+                if ans is None:
+                    continue
+                if ans <= 0:
+                    messagebox.showwarning('提示', '目标价必须为正数')
+                    continue
+                self.app.pm.set_target_price(ts_code, float(ans))
+                updated += 1
+            if updated:
+                self.status.set(f'已更新 {updated} 条目标价')
+                self.refresh_report()
+        except Exception as e:
+            messagebox.showerror('错误', str(e))
         # redraw charts
         self.draw_positions_pie(report=rep)
 
