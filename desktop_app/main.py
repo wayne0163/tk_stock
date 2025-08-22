@@ -2,7 +2,7 @@ import os
 import sys
 import threading
 from datetime import datetime
-from tkinter import Tk, StringVar, IntVar, BooleanVar, END, messagebox, filedialog
+from tkinter import Tk, StringVar, IntVar, BooleanVar, END, messagebox, filedialog, Toplevel
 from tkinter import simpledialog
 from tkinter import ttk
 
@@ -374,9 +374,18 @@ class PortfolioTab(ttk.Frame):
             ttk.Entry(trade_frame, textvariable=self.trade_target_var, width=10).grid(row=0, column=9)
             ttk.Button(trade_frame, text='执行交易', command=self.execute_trade).grid(row=0, column=10, padx=(16, 6))
 
-            # Report
-            rep_frame = ttk.LabelFrame(self, text='投资组合概览')
-            rep_frame.pack(fill='both', expand=True, padx=10, pady=8)
+            # Split layout: top report + bottom NAV area
+            paned = ttk.Panedwindow(self, orient='vertical')
+            paned.pack(fill='both', expand=True, padx=10, pady=8)
+
+            upper = ttk.Frame(paned)
+            lower = ttk.Frame(paned)
+            paned.add(upper, weight=3)
+            paned.add(lower, weight=2)
+
+            # Report (in upper pane)
+            rep_frame = ttk.LabelFrame(upper, text='投资组合概览')
+            rep_frame.pack(fill='both', expand=True)
             btn_row = ttk.Frame(rep_frame)
             btn_row.pack(fill='x')
             ttk.Button(btn_row, text='刷新投资组合报告', command=self.refresh_report).pack(side='left', padx=8, pady=6)
@@ -399,30 +408,29 @@ class PortfolioTab(ttk.Frame):
             self.pos_tree.tag_configure('warn', foreground='red')
             self.pos_tree.pack(fill='both', expand=True, padx=8, pady=6)
 
-            # Positions distribution chart (pie)
+            # Money & reports controls
+            ctrl_row = ttk.Frame(rep_frame)
+            ctrl_row.pack(fill='x', padx=8, pady=(0, 6))
+            ttk.Button(ctrl_row, text='存入现金', command=self.deposit_cash).pack(side='left')
+            ttk.Button(ctrl_row, text='取出现金', command=self.withdraw_cash).pack(side='left', padx=8)
+            ttk.Button(ctrl_row, text='全部卖出(按最新价)', command=self.sell_all_positions).pack(side='left', padx=(16, 8))
+            ttk.Button(ctrl_row, text='重置为未初始化', command=self.reset_portfolio).pack(side='left')
+
+            # Positions distribution (popup)
             pie_container = ttk.Frame(rep_frame)
             pie_container.pack(fill='x', padx=8, pady=4)
-            ttk.Button(pie_container, text='刷新持仓分布图', command=self.draw_positions_pie).pack(side='left')
-            ttk.Button(pie_container, text='保存饼图为PNG', command=lambda: self.save_figure(self.pos_fig, 'positions_pie.png')).pack(side='left', padx=8)
-            ttk.Button(pie_container, text='导出持仓明细CSV', command=self.export_positions_csv).pack(side='left')
-            self.pos_fig = Figure(figsize=(4.5, 3.2), dpi=100)
-            self.pos_ax = self.pos_fig.add_subplot(111)
-            self.pos_canvas = FigureCanvasTkAgg(self.pos_fig, master=rep_frame)
-            self.pos_canvas.get_tk_widget().pack(fill='x', padx=8, pady=6)
+            ttk.Button(pie_container, text='查看持仓分布图', command=self.open_positions_pie_window).pack(side='left')
+            ttk.Button(pie_container, text='导出持仓明细CSV', command=self.export_positions_csv).pack(side='left', padx=8)
 
-            snap_frame = ttk.LabelFrame(self, text='净值快照')
-            snap_frame.pack(fill='x', padx=10, pady=8)
+            # NAV area (in lower pane)
+            snap_frame = ttk.LabelFrame(lower, text='净值快照')
+            snap_frame.pack(fill='x')
             ttk.Button(snap_frame, text='重建净值快照', command=self.rebuild_snapshots).pack(side='left', padx=8, pady=6)
-            ttk.Button(snap_frame, text='刷新净值曲线', command=self.draw_nav_curve).pack(side='left')
-            ttk.Button(snap_frame, text='保存净值曲线PNG', command=lambda: self.save_figure(self.nav_fig, 'nav_curve.png')).pack(side='left', padx=8)
+            ttk.Button(snap_frame, text='查看净值曲线', command=self.open_nav_curve_window).pack(side='left')
             self.snap_var = StringVar(value='')
             ttk.Label(snap_frame, textvariable=self.snap_var).pack(side='left')
 
-            # NAV curve chart
-            self.nav_fig = Figure(figsize=(7.5, 3.4), dpi=100)
-            self.nav_ax = self.nav_fig.add_subplot(111)
-            self.nav_canvas = FigureCanvasTkAgg(self.nav_fig, master=self)
-            self.nav_canvas.get_tk_widget().pack(fill='x', padx=10, pady=6)
+            # No inline NAV chart by default; shown in popup when needed
 
     def initialize_cash(self):
         try:
@@ -524,8 +532,7 @@ class PortfolioTab(ttk.Frame):
                 self.refresh_report()
         except Exception as e:
             messagebox.showerror('错误', str(e))
-        # redraw charts
-        self.draw_positions_pie(report=rep)
+        # 图表改为弹窗展示，此处无需重绘
 
     def rebuild_snapshots(self):
         days = self.app.pm.rebuild_snapshots()
@@ -538,38 +545,42 @@ class PortfolioTab(ttk.Frame):
         try:
             rep = report or self.app.pm.generate_portfolio_report()
             positions = rep.get('positions') or []
-            self.pos_ax.clear()
-            if positions:
-                labels = [p.get('name') or p.get('ts_code') for p in positions]
-                sizes = [max(float(p.get('market_value') or 0), 0.0) for p in positions]
-                total = sum(sizes)
-                if total > 0:
-                    self.pos_ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90, pctdistance=0.85)
-                    self.pos_ax.set_title('持仓分布（按市值）')
+            # 保留旧方法以兼容，但默认不在主界面绘制
+            if hasattr(self, 'pos_ax') and hasattr(self, 'pos_fig') and hasattr(self, 'pos_canvas'):
+                self.pos_ax.clear()
+                if positions:
+                    labels = [p.get('name') or p.get('ts_code') for p in positions]
+                    sizes = [max(float(p.get('market_value') or 0), 0.0) for p in positions]
+                    total = sum(sizes)
+                    if total > 0:
+                        self.pos_ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90, pctdistance=0.85)
+                        self.pos_ax.set_title('持仓分布（按市值）')
+                    else:
+                        self.pos_ax.text(0.5, 0.5, '当前无持仓', ha='center', va='center')
                 else:
                     self.pos_ax.text(0.5, 0.5, '当前无持仓', ha='center', va='center')
-            else:
-                self.pos_ax.text(0.5, 0.5, '当前无持仓', ha='center', va='center')
-            self.pos_fig.tight_layout()
-            self.pos_canvas.draw()
+                self.pos_fig.tight_layout()
+                self.pos_canvas.draw()
         except Exception as e:
             messagebox.showerror('绘图失败', str(e))
 
     def draw_nav_curve(self):
         try:
             df = self.app.pm.get_snapshots()
-            self.nav_ax.clear()
-            if df is not None and not df.empty:
-                s = df['total_value']
-                self.nav_ax.plot(s.index, s.values, label='组合净值')
-                self.nav_ax.set_title('组合净值曲线')
-                self.nav_ax.set_xlabel('日期')
-                self.nav_ax.set_ylabel('总资产')
-                self.nav_ax.legend()
-            else:
-                self.nav_ax.text(0.5, 0.5, '暂无快照数据，请先重建。', ha='center', va='center')
-            self.nav_fig.tight_layout()
-            self.nav_canvas.draw()
+            # 保留旧方法以兼容，但默认不在主界面绘制
+            if hasattr(self, 'nav_ax') and hasattr(self, 'nav_fig') and hasattr(self, 'nav_canvas'):
+                self.nav_ax.clear()
+                if df is not None and not df.empty:
+                    s = df['total_value']
+                    self.nav_ax.plot(s.index, s.values, label='组合净值')
+                    self.nav_ax.set_title('组合净值曲线')
+                    self.nav_ax.set_xlabel('日期')
+                    self.nav_ax.set_ylabel('总资产')
+                    self.nav_ax.legend()
+                else:
+                    self.nav_ax.text(0.5, 0.5, '暂无快照数据，请先重建。', ha='center', va='center')
+                self.nav_fig.tight_layout()
+                self.nav_canvas.draw()
         except Exception as e:
             messagebox.showerror('绘图失败', str(e))
 
@@ -612,6 +623,110 @@ class PortfolioTab(ttk.Frame):
                 subprocess.call(['xdg-open', path])
         except Exception:
             pass
+
+    # ---- Added: cash ops and popup charts ----
+    def deposit_cash(self):
+        try:
+            amt = simpledialog.askfloat('存入现金', '金额：', minvalue=0.0)
+            if amt is None:
+                return
+            if amt <= 0:
+                messagebox.showwarning('提示', '金额需为正数')
+                return
+            self.app.pm.update_cash(amt)
+            self.status.set(f'已存入现金 ¥{amt:.2f}')
+            self.refresh_report()
+        except Exception as e:
+            messagebox.showerror('操作失败', str(e))
+
+    def withdraw_cash(self):
+        try:
+            amt = simpledialog.askfloat('取出现金', '金额：', minvalue=0.0)
+            if amt is None:
+                return
+            if amt <= 0:
+                messagebox.showwarning('提示', '金额需为正数')
+                return
+            self.app.pm.update_cash(-amt)
+            self.status.set(f'已取出现金 ¥{amt:.2f}')
+            self.refresh_report()
+        except Exception as e:
+            messagebox.showerror('操作失败', str(e))
+
+    def sell_all_positions(self):
+        try:
+            if not messagebox.askyesno('确认', '确认按最新价卖出全部持仓？'):
+                return
+            cnt = self.app.pm.sell_all_positions_at_market()
+            self.status.set(f'已卖出 {cnt} 个持仓')
+            self.refresh_report()
+        except Exception as e:
+            messagebox.showerror('操作失败', str(e))
+
+    def reset_portfolio(self):
+        try:
+            if not messagebox.askyesno('确认', '确认重置为未初始化状态？（删除当前组合与交易记录）'):
+                return
+            self.app.pm.reset_portfolio()
+            self.status.set('组合已重置')
+            for w in self.winfo_children():
+                w.destroy()
+            self._build()
+        except Exception as e:
+            messagebox.showerror('操作失败', str(e))
+
+    def open_positions_pie_window(self):
+        try:
+            rep = self.app.pm.generate_portfolio_report()
+            positions = rep.get('positions') or []
+            win = Toplevel(self)
+            win.title('持仓分布图')
+            fig = Figure(figsize=(6.0, 4.0), dpi=100)
+            ax = fig.add_subplot(111)
+            if positions:
+                labels = [p.get('name') or p.get('ts_code') for p in positions]
+                sizes = [max(float(p.get('market_value') or 0), 0.0) for p in positions]
+                total = sum(sizes)
+                if total > 0:
+                    ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90, pctdistance=0.85)
+                    ax.set_title('持仓分布（按市值）')
+                else:
+                    ax.text(0.5, 0.5, '当前无持仓', ha='center', va='center')
+            else:
+                ax.text(0.5, 0.5, '当前无持仓', ha='center', va='center')
+            canvas = FigureCanvasTkAgg(fig, master=win)
+            canvas.get_tk_widget().pack(fill='both', expand=True)
+            canvas.draw()
+            row = ttk.Frame(win)
+            row.pack(fill='x')
+            ttk.Button(row, text='保存PNG', command=lambda: self.save_figure(fig, 'positions_pie.png')).pack(side='left', padx=8, pady=6)
+        except Exception as e:
+            messagebox.showerror('绘图失败', str(e))
+
+    def open_nav_curve_window(self):
+        try:
+            df = self.app.pm.get_snapshots()
+            win = Toplevel(self)
+            win.title('组合净值曲线')
+            fig = Figure(figsize=(7.5, 4.0), dpi=100)
+            ax = fig.add_subplot(111)
+            if df is not None and not df.empty:
+                s = df['total_value']
+                ax.plot(s.index, s.values, label='组合净值')
+                ax.set_title('组合净值曲线')
+                ax.set_xlabel('日期')
+                ax.set_ylabel('总资产')
+                ax.legend()
+            else:
+                ax.text(0.5, 0.5, '暂无快照数据，请先重建。', ha='center', va='center')
+            canvas = FigureCanvasTkAgg(fig, master=win)
+            canvas.get_tk_widget().pack(fill='both', expand=True)
+            canvas.draw()
+            row = ttk.Frame(win)
+            row.pack(fill='x')
+            ttk.Button(row, text='保存PNG', command=lambda: self.save_figure(fig, 'nav_curve.png')).pack(side='left', padx=8, pady=6)
+        except Exception as e:
+            messagebox.showerror('绘图失败', str(e))
 
 
 class StrategyTab(ttk.Frame):

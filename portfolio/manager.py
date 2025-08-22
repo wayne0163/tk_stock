@@ -65,6 +65,44 @@ class PortfolioManager:
         self.cash += amount
         self.save_portfolio()
 
+    def sell_all_positions_at_market(self) -> int:
+        """Sell all current positions using the latest available close price.
+        Returns number of sell trades executed.
+        """
+        if not self.is_initialized():
+            raise ValueError("Portfolio not initialized.")
+        if not self.positions:
+            return 0
+        ts_codes = list(self.positions.keys())
+        placeholders = ','.join('?' for _ in ts_codes)
+        rows = self.db.fetch_all(
+            f"""
+            SELECT p.ts_code, p.close AS current_price
+            FROM daily_price p
+            JOIN (
+                SELECT ts_code, MAX(date) AS max_date
+                FROM daily_price
+                WHERE ts_code IN ({placeholders})
+                GROUP BY ts_code
+            ) AS latest ON p.ts_code = latest.ts_code AND p.date = latest.max_date
+            """,
+            tuple(ts_codes)
+        )
+        price_map = {r['ts_code']: float(r['current_price']) for r in rows if r.get('current_price') is not None}
+        count = 0
+        # iterate over a list copy because we'll mutate positions via add_trade
+        for code, pos in list(self.positions.items()):
+            qty = float(pos.get('qty') or 0)
+            if qty <= 0:
+                continue
+            px = price_map.get(code)
+            if px is None or px <= 0:
+                # skip if no price available
+                continue
+            self.add_trade('sell', code, px, qty)
+            count += 1
+        return count
+
     def add_trade(self, side: str, ts_code: str, price: float, qty: float, fee: float = 0, date: str = None, target_price: float = None):
         if not self.is_initialized():
             raise ValueError("Portfolio not initialized.")
