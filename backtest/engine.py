@@ -140,7 +140,11 @@ def create_backtest_plot(results, ts_codes, strategy_name, start_date: str, end_
         xaxis_title="日期",
         legend_title="图例",
         template="plotly_white",
-        xaxis_tickformat='%Y-%m-%d'
+        xaxis_tickformat='%Y-%m-%d',
+        font=dict(
+            family="PingFang SC, Microsoft YaHei, SimHei, Noto Sans CJK SC, Arial Unicode MS, Arial",
+            size=12
+        )
     )
     return fig
 

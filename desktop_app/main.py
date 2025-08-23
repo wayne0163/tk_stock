@@ -10,6 +10,7 @@ from tkinter import ttk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import matplotlib.ticker as mtick
+from matplotlib import font_manager, rcParams
 import subprocess
 
 # Ensure project root on sys.path
@@ -24,6 +25,34 @@ from data.data_fetcher import DataFetcher
 from portfolio.manager import PortfolioManager
 from strategies.manager import StrategyManager
 from utils.code_processor import to_ts_code
+from risk.analyzer import RiskAnalyzer
+
+
+# Configure Chinese fonts for Matplotlib (avoid garbled labels)
+def _configure_chinese_font():
+    try:
+        rcParams['axes.unicode_minus'] = False  # Proper minus sign with non-ASCII fonts
+        candidates = [
+            'PingFang SC',       # macOS
+            'Heiti SC', 'STHeiti', 'Hiragino Sans GB', 'Songti SC',
+            'Microsoft YaHei',   # Windows
+            'SimHei',            # Windows common
+            'Noto Sans CJK SC',  # Linux/any (if installed)
+            'WenQuanYi Zen Hei', # Linux older distros
+            'Arial Unicode MS',  # Broad Unicode coverage
+        ]
+        available = {f.name for f in font_manager.fontManager.ttflist}
+        for name in candidates:
+            if name in available:
+                # Prepend to sans-serif list so it's preferred
+                cur = list(rcParams.get('font.sans-serif', []))
+                rcParams['font.sans-serif'] = [name] + cur
+                return name
+    except Exception:
+        pass
+    return None
+
+_CH_FONT = _configure_chinese_font()
 
 
 class AppState:
@@ -33,6 +62,7 @@ class AppState:
         self.df = DataFetcher(self.db)
         self.pm = PortfolioManager(self.db)
         self.sm = StrategyManager(self.db)
+        self.ra = RiskAnalyzer(self.pm)
 
 
 class StatusBar(ttk.Frame):
@@ -189,13 +219,13 @@ class WatchlistFrame(ttk.Frame):
         # Table
         table_frame = ttk.Frame(self)
         table_frame.pack(fill='both', expand=True, padx=10, pady=8)
-        columns = ('ts_code', 'name', 'in_pool') if not is_index else ('ts_code', 'name')
+        # 展示 in_pool 列：股票=回测池，指数=轮播池
+        columns = ('ts_code', 'name', 'in_pool')
         self.tree = ttk.Treeview(table_frame, columns=columns, show='headings', selectmode='extended')
         self.tree.heading('ts_code', text='代码')
         self.tree.heading('name', text='名称')
-        if 'in_pool' in columns:
-            self.tree.heading('in_pool', text='回测池')
-            self.tree.column('in_pool', width=70, anchor='center')
+        self.tree.heading('in_pool', text=('轮播池' if self.is_index else '回测池'))
+        self.tree.column('in_pool', width=70, anchor='center')
         self.tree.column('ts_code', width=120)
         self.tree.column('name', width=160)
         self.tree.pack(side='left', fill='both', expand=True)
@@ -206,7 +236,13 @@ class WatchlistFrame(ttk.Frame):
         # Bulk actions
         action_frame = ttk.Frame(self)
         action_frame.pack(fill='x', padx=10, pady=6)
-        if not is_index:
+        # 选择控制（单一按钮：全选/全不选 切换）
+        ttk.Button(action_frame, text='全选/全不选', command=self.toggle_select_all).pack(side='left', padx=(0, 16))
+        # 池操作（股票=回测池；指数=轮播池）
+        if self.is_index:
+            ttk.Button(action_frame, text='选中加入轮播池', command=self.add_to_pool).pack(side='left')
+            ttk.Button(action_frame, text='选中移出轮播池', command=self.remove_from_pool).pack(side='left', padx=8)
+        else:
             ttk.Button(action_frame, text='选中加入回测池', command=self.add_to_pool).pack(side='left')
             ttk.Button(action_frame, text='选中移出回测池', command=self.remove_from_pool).pack(side='left', padx=8)
         ttk.Button(action_frame, text='删除选中项', command=self.delete_selected).pack(side='left', padx=(0, 8))
@@ -219,7 +255,7 @@ class WatchlistFrame(ttk.Frame):
             self.tree.delete(item)
         rows = self.app.db.fetch_all(f"SELECT ts_code, name, in_pool FROM {self.table_name} ORDER BY ts_code")
         for row in rows:
-            vals = (row['ts_code'], row['name']) if self.is_index else (row['ts_code'], row['name'], int(row['in_pool'] or 0))
+            vals = (row['ts_code'], row['name'], int(row['in_pool'] or 0))
             self.tree.insert('', END, values=vals)
 
     def add_code(self):
@@ -287,14 +323,27 @@ class WatchlistFrame(ttk.Frame):
             codes.append(vals[0])
         return codes
 
+    def toggle_select_all(self):
+        items = list(self.tree.get_children())
+        selected = set(self.tree.selection())
+        if items and len(selected) == len(items):
+            # all selected -> clear
+            self.tree.selection_remove(*selected)
+        else:
+            # not all selected -> select all
+            for item in items:
+                if item not in selected:
+                    self.tree.selection_add(item)
+
     def add_to_pool(self):
         codes = self._selected_codes()
         if not codes:
             messagebox.showinfo('提示', '请先选择要加入回测池的股票')
             return
         placeholders = ','.join('?' for _ in codes)
-        self.app.db.execute(f"UPDATE watchlist SET in_pool = 1 WHERE ts_code IN ({placeholders})", tuple(codes))
-        self.status.set(f"已将 {len(codes)} 只股票加入回测池。")
+        self.app.db.execute(f"UPDATE {self.table_name} SET in_pool = 1 WHERE ts_code IN ({placeholders})", tuple(codes))
+        msg = '指数加入轮播池' if self.is_index else '股票加入回测池'
+        self.status.set(f"已将 {len(codes)} 个{('指数' if self.is_index else '股票')}加入{('轮播池' if self.is_index else '回测池')}。")
         self.refresh()
 
     def remove_from_pool(self):
@@ -303,9 +352,11 @@ class WatchlistFrame(ttk.Frame):
             messagebox.showinfo('提示', '请先选择要移出回测池的股票')
             return
         placeholders = ','.join('?' for _ in codes)
-        self.app.db.execute(f"UPDATE watchlist SET in_pool = 0 WHERE ts_code IN ({placeholders})", tuple(codes))
-        self.status.set(f"已将 {len(codes)} 只股票移出回测池。")
+        self.app.db.execute(f"UPDATE {self.table_name} SET in_pool = 0 WHERE ts_code IN ({placeholders})", tuple(codes))
+        self.status.set(f"已将 {len(codes)} 个{('指数' if self.is_index else '股票')}移出{('轮播池' if self.is_index else '回测池')}。")
         self.refresh()
+
+    # note: 全部加入/移出操作已移除，应通过选择后批量操作
 
     def delete_selected(self):
         codes = self._selected_codes()
@@ -408,13 +459,17 @@ class PortfolioTab(ttk.Frame):
             self.pos_tree.tag_configure('warn', foreground='red')
             self.pos_tree.pack(fill='both', expand=True, padx=8, pady=6)
 
-            # Money & reports controls
-            ctrl_row = ttk.Frame(rep_frame)
-            ctrl_row.pack(fill='x', padx=8, pady=(0, 6))
-            ttk.Button(ctrl_row, text='存入现金', command=self.deposit_cash).pack(side='left')
-            ttk.Button(ctrl_row, text='取出现金', command=self.withdraw_cash).pack(side='left', padx=8)
-            ttk.Button(ctrl_row, text='全部卖出(按最新价)', command=self.sell_all_positions).pack(side='left', padx=(16, 8))
-            ttk.Button(ctrl_row, text='重置为未初始化', command=self.reset_portfolio).pack(side='left')
+            # Money & reports controls (split to two rows for small screens)
+            ctrl_row1 = ttk.Frame(rep_frame)
+            ctrl_row1.pack(fill='x', padx=8, pady=(0, 4))
+            ttk.Button(ctrl_row1, text='存入现金', command=self.deposit_cash).pack(side='left')
+            ttk.Button(ctrl_row1, text='取出现金', command=self.withdraw_cash).pack(side='left', padx=8)
+            ttk.Button(ctrl_row1, text='指标说明', command=self.show_indicator_help).pack(side='left', padx=(16, 0))
+
+            ctrl_row2 = ttk.Frame(rep_frame)
+            ctrl_row2.pack(fill='x', padx=8, pady=(0, 6))
+            ttk.Button(ctrl_row2, text='全部卖出(按最新价)', command=self.sell_all_positions).pack(side='left')
+            ttk.Button(ctrl_row2, text='重置为未初始化', command=self.reset_portfolio).pack(side='left', padx=8)
 
             # Positions distribution (popup)
             pie_container = ttk.Frame(rep_frame)
@@ -488,10 +543,10 @@ class PortfolioTab(ttk.Frame):
             ts = float(p.get('trailing_stop') or 0)
             ma = float(p.get('ma20_stop') or 0)
             tgt = float(p.get('target_price') or 0)
+            # 仅当当前价低于 跟踪止盈 或 20日均线 时标红；目标价不参与预警。
             warn = any([
                 (ts > 0 and cur < ts),
                 (ma > 0 and cur < ma),
-                (tgt > 0 and cur < tgt),
             ])
             tags = ('warn',) if warn else ()
             self.pos_tree.insert('', END, values=(
@@ -591,14 +646,14 @@ class PortfolioTab(ttk.Frame):
             if not positions:
                 messagebox.showinfo('提示', '当前无持仓可导出')
                 return
-            import pandas as pd
+            import pandas as pd, time
             df = pd.DataFrame(positions)
-            path = filedialog.asksaveasfilename(title='保存持仓明细', defaultextension='.csv', filetypes=[('CSV 文件', '*.csv')])
-            if not path:
-                return
+            outdir = os.path.abspath(os.path.join(PROJECT_ROOT, 'output'))
+            os.makedirs(outdir, exist_ok=True)
+            ts = time.strftime('%Y%m%d_%H%M%S')
+            path = os.path.join(outdir, f'positions_{ts}.csv')
             df.to_csv(path, index=False, encoding='utf-8-sig')
             self.status.set(f'已导出持仓明细至 {path}')
-            self._open_path(path)
         except Exception as e:
             messagebox.showerror('导出失败', str(e))
 
@@ -625,6 +680,17 @@ class PortfolioTab(ttk.Frame):
             pass
 
     # ---- Added: cash ops and popup charts ----
+    def _save_fig_quick(self, fig: Figure, base_name: str):
+        try:
+            import time
+            outdir = os.path.abspath(os.path.join(PROJECT_ROOT, 'output'))
+            os.makedirs(outdir, exist_ok=True)
+            ts = time.strftime('%Y%m%d_%H%M%S')
+            path = os.path.join(outdir, f'{base_name}_{ts}.png')
+            fig.savefig(path, dpi=150, bbox_inches='tight')
+            self.status.set(f'图像已保存：{path}')
+        except Exception as e:
+            messagebox.showerror('保存失败', str(e))
     def deposit_cash(self):
         try:
             amt = simpledialog.askfloat('存入现金', '金额：', minvalue=0.0)
@@ -700,6 +766,7 @@ class PortfolioTab(ttk.Frame):
             row = ttk.Frame(win)
             row.pack(fill='x')
             ttk.Button(row, text='保存PNG', command=lambda: self.save_figure(fig, 'positions_pie.png')).pack(side='left', padx=8, pady=6)
+            ttk.Button(row, text='快速保存到output', command=lambda: self._save_fig_quick(fig, 'positions_pie')).pack(side='left')
         except Exception as e:
             messagebox.showerror('绘图失败', str(e))
 
@@ -725,8 +792,36 @@ class PortfolioTab(ttk.Frame):
             row = ttk.Frame(win)
             row.pack(fill='x')
             ttk.Button(row, text='保存PNG', command=lambda: self.save_figure(fig, 'nav_curve.png')).pack(side='left', padx=8, pady=6)
+            ttk.Button(row, text='快速保存到output', command=lambda: self._save_fig_quick(fig, 'nav_curve')).pack(side='left')
         except Exception as e:
             messagebox.showerror('绘图失败', str(e))
+
+    def show_indicator_help(self):
+        txt = (
+            '指标计算与使用说明\n\n'
+            '1) 跟踪止盈价：\n'
+            '   - 计算公式：max( 买入后最高收盘价 × 85%, 买入价 × 92% )；\n'
+            '   - 含义：仅当价格上涨时启用跟踪，止盈位随最高价抬升；\n'
+            '     在价格回落且收盘价跌破止盈位时，视为触发止盈，可考虑平仓。\n\n'
+            '2) 20日均线价：\n'
+            '   - 计算公式：最近20个交易日的简单移动平均(SMA)；\n'
+            '   - 用途：作为趋势过滤或离场参考，价格跌破可提示风险。\n\n'
+            '3) 目标价（价值止盈）：\n'
+            '   - 用户手动设定的止盈目标，不作为预警阈值；\n'
+            '   - 当价格达到/超过目标价时，可考虑分批或全部止盈。\n\n'
+            '4) 预警着色规则：\n'
+            '   - 当前价 < 跟踪止盈价 或 当前价 < 20日均线价 时，行记录标红提示；\n'
+            '   - 目标价不触发红色预警，仅作参考。\n\n'
+            '提示：本页的一键操作包括“全部卖出(按最新价)”“存入/取出现金”“重置为未初始化”。\n'
+        )
+        win = Toplevel(self)
+        win.title('指标计算与使用说明')
+        frm = ttk.Frame(win)
+        frm.pack(fill='both', expand=True, padx=10, pady=10)
+        lbl = ttk.Label(frm, text=txt, justify='left', anchor='w')
+        lbl.configure(wraplength=600)
+        lbl.pack(fill='both', expand=True)
+        ttk.Button(frm, text='关闭', command=win.destroy).pack(anchor='e', pady=(8, 0))
 
 
 class StrategyTab(ttk.Frame):
@@ -815,45 +910,34 @@ class IndexCompareTab(ttk.Frame):
 
         top = ttk.Frame(self)
         top.pack(fill='x', padx=10, pady=8)
-
-        # Base index dropdown
-        ttk.Label(top, text='基准指数：').pack(side='left')
-        indices = self.app.db.fetch_all("SELECT ts_code, name FROM index_watchlist ORDER BY ts_code")
-        self.index_options = [(f"{i['name']} ({i['ts_code']})", i['ts_code']) for i in indices]
-        self.base_var = StringVar()
-        base_combo = ttk.Combobox(top, textvariable=self.base_var, values=[x[0] for x in self.index_options], state='readonly', width=40)
-        if self.index_options:
-            # prefer 000985.CSI if present
-            labels = [x[1] for x in self.index_options]
-            try:
-                base_combo.current(labels.index('000985.CSI'))
-            except ValueError:
-                base_combo.current(0)
-        base_combo.pack(side='left', padx=6)
+        self.base_code = None  # 在列表中通过“基准”列单选
 
         # Date range simple entries
         ttk.Label(top, text='起始(YYYYMMDD)：').pack(side='left', padx=(12, 4))
         self.idx_start_var = StringVar(value='20240101')
         ttk.Entry(top, textvariable=self.idx_start_var, width=12).pack(side='left')
-        ttk.Button(top, text='今年初', command=self._set_start_year_begin).pack(side='left', padx=(4, 8))
         ttk.Label(top, text='结束(YYYYMMDD)：').pack(side='left', padx=(12, 4))
         from datetime import date
         self.idx_end_var = StringVar(value=date.today().strftime('%Y%m%d'))
         ttk.Entry(top, textvariable=self.idx_end_var, width=12).pack(side='left')
-        ttk.Button(top, text='今天', command=self._set_end_today).pack(side='left', padx=(4, 8))
 
-        # Right panel for action
-        ttk.Button(top, text='加载可选指数', command=self._load_candidates).pack(side='left', padx=10)
+        # 进入页面将自动加载指数列表
 
         mid = ttk.Frame(self)
         mid.pack(fill='x', padx=10, pady=4)
-        ttk.Label(mid, text='选择参与对比的指数（多选）').pack(anchor='w')
-        self.listbox = ttk.Treeview(mid, columns=('code', 'name'), show='headings', selectmode='extended', height=6)
+        ttk.Label(mid, text='选择参与对比的指数（勾选加入轮播池；单选基准）').pack(anchor='w')
+        self.listbox = ttk.Treeview(mid, columns=('code', 'name', 'in_pool', 'base'), show='headings', selectmode='browse', height=10)
         self.listbox.heading('code', text='代码')
         self.listbox.heading('name', text='名称')
+        self.listbox.heading('in_pool', text='轮播池')
+        self.listbox.heading('base', text='基准')
         self.listbox.column('code', width=120)
         self.listbox.column('name', width=180)
+        self.listbox.column('in_pool', width=80, anchor='center')
+        self.listbox.column('base', width=80, anchor='center')
         self.listbox.pack(fill='x')
+        # 点击列切换（#3 轮播池）或设置（#4 基准）
+        self.listbox.bind('<Button-1>', self._on_index_list_click)
 
         ctrl = ttk.Frame(self)
         ctrl.pack(fill='x', padx=10, pady=6)
@@ -872,7 +956,8 @@ class IndexCompareTab(ttk.Frame):
         save_row = ttk.Frame(self)
         save_row.pack(fill='x', padx=10, pady=(0, 8))
         ttk.Button(save_row, text='保存图像PNG', command=lambda: self.save_figure(self.fig, 'index_compare.png')).pack(side='left')
-        ttk.Button(save_row, text='导出当前数据CSV', command=self.export_current_csv).pack(side='left', padx=8)
+        ttk.Button(save_row, text='快速保存PNG到output', command=lambda: self.save_figure_quick(self.fig, 'index_compare')).pack(side='left', padx=8)
+        ttk.Button(save_row, text='导出当前数据CSV到output', command=self.export_current_csv).pack(side='left')
 
         self._candidates = []
         self._pos = 0
@@ -884,20 +969,35 @@ class IndexCompareTab(ttk.Frame):
         self._busy_bar = ttk.Progressbar(self._busy_frame, mode='indeterminate', length=200)
         self._busy_label.pack(side='left', padx=(8, 6))
         self._busy_bar.pack(side='left', padx=6)
+        # 初始自动加载
+        self._load_candidates()
 
     def _load_candidates(self):
-        if not self.index_options:
-            messagebox.showinfo('提示', '自选指数列表为空，请先添加指数并更新数据。')
+        rows_all = self.app.db.fetch_all("SELECT ts_code, name, in_pool FROM index_watchlist ORDER BY ts_code")
+        if not rows_all:
+            messagebox.showinfo('提示', '自选指数列表为空，请先在“自选列表管理”添加指数。')
             return
-        base_label = self.base_var.get() or self.index_options[0][0]
-        base_code = dict(self.index_options).get(base_label, self.index_options[0][1])
-        # fill listbox with all except base
+        codes = [r['ts_code'] for r in rows_all]
+        if not self.base_code:
+            self.base_code = '000985.CSI' if '000985.CSI' in codes else codes[0]
         for item in self.listbox.get_children():
             self.listbox.delete(item)
-        rows = [x for x in self.index_options if x[1] != base_code]
-        for label, code in rows:
-            name = label.split(' (')[0]
-            self.listbox.insert('', END, values=(code, name))
+        first_pool_row = None
+        for r in rows_all:
+            code = r['ts_code']; name = r['name']; in_pool = int(r['in_pool'] or 0)
+            tick = '✓' if in_pool else ''
+            base_mark = '●' if code == self.base_code else ''
+            rowid = self.listbox.insert('', END, values=(code, name, tick, base_mark))
+            if in_pool and first_pool_row is None:
+                first_pool_row = rowid
+        # 自动定位到第一个已勾选的指数
+        if first_pool_row:
+            try:
+                self.listbox.selection_set(first_pool_row)
+                self.listbox.focus(first_pool_row)
+                self.listbox.see(first_pool_row)
+            except Exception:
+                pass
 
     def _selected_codes(self):
         items = self.listbox.selection()
@@ -906,6 +1006,36 @@ class IndexCompareTab(ttk.Frame):
             vals = self.listbox.item(item, 'values')
             codes.append(vals[0])
         return codes
+
+    def _on_index_list_click(self, event):
+        region = self.listbox.identify('region', event.x, event.y)
+        if region != 'cell':
+            return
+        col = self.listbox.identify_column(event.x)
+        rowid = self.listbox.identify_row(event.y)
+        if not rowid:
+            return
+        vals = list(self.listbox.item(rowid, 'values'))
+        code = vals[0]
+        # 轮播池列
+        if col == '#3':
+            curr = 1 if (len(vals) >= 3 and vals[2] == '✓') else 0
+            newv = 0 if curr == 1 else 1
+            self.app.db.execute("UPDATE index_watchlist SET in_pool = ? WHERE ts_code = ?", (newv, code))
+            vals[2] = '✓' if newv else ''
+            self.listbox.item(rowid, values=vals)
+            self.status.set(f"{code} 已{'加入' if newv else '移出'}轮播池")
+        # 基准列（单选）
+        elif col == '#4':
+            if self.base_code == code:
+                return
+            self.base_code = code
+            for it in self.listbox.get_children():
+                v = list(self.listbox.item(it, 'values'))
+                if len(v) >= 4:
+                    v[3] = '●' if v[0] == code else ''
+                    self.listbox.item(it, values=v)
+            self.status.set(f'已设置基准指数：{code}')
 
     def _set_start_year_begin(self):
         from datetime import date
@@ -917,11 +1047,12 @@ class IndexCompareTab(ttk.Frame):
         self.idx_end_var.set(date.today().strftime('%Y%m%d'))
 
     def start_compare(self):
-        codes = self._selected_codes()
-        if not codes:
-            messagebox.showwarning('提示', '请至少选择一个参与对比的指数')
+        # 直接读取轮播池（用户通过勾选控制）
+        rows = self.app.db.fetch_all("SELECT ts_code FROM index_watchlist WHERE in_pool = 1 ORDER BY ts_code")
+        if not rows:
+            messagebox.showwarning('提示', '轮播池为空，请先在表格中勾选指数')
             return
-        self._candidates = codes
+        self._candidates = [r['ts_code'] for r in rows]
         self._pos = 0
         self._plot_current()
 
@@ -939,8 +1070,15 @@ class IndexCompareTab(ttk.Frame):
         if len(start) != 8 or not start.isdigit() or len(end) != 8 or not end.isdigit():
             messagebox.showwarning('提示', '日期格式应为YYYYMMDD')
             return
-        base_label = self.base_var.get() or self.index_options[0][0]
-        base_code = dict(self.index_options).get(base_label, self.index_options[0][1])
+        base_code = self.base_code
+        if not base_code:
+            # 若未选择基准，尝试默认
+            rows_all = self.app.db.fetch_all("SELECT ts_code FROM index_watchlist ORDER BY ts_code")
+            if rows_all:
+                base_code = rows_all[0]['ts_code']
+            else:
+                messagebox.showwarning('提示', '请先在列表中选择基准指数')
+                return
         code = self._candidates[self._pos]
         try:
             self._start_busy('正在计算指数对比...')
@@ -952,14 +1090,19 @@ class IndexCompareTab(ttk.Frame):
                 self.canvas.draw()
                 return
             # Plot ratio and MA
+            indicators = ['ratio']
             self.ax.plot(df['date'], df['ratio_c'], label='ratio')
             if 'c_ma10' in df.columns:
                 self.ax.plot(df['date'], df['c_ma10'], label='MA10')
+                indicators.append('MA10')
             if 'c_ma20' in df.columns:
                 self.ax.plot(df['date'], df['c_ma20'], label='MA20')
+                indicators.append('MA20')
             if 'c_ma60' in df.columns:
                 self.ax.plot(df['date'], df['c_ma60'], label='MA60')
-            self.ax.set_title(f'{code} vs {base_code} 收盘价比值')
+                indicators.append('MA60')
+            ind_text = ', '.join(indicators)
+            self.ax.set_title(f'{code} vs {base_code} | 指标: {ind_text}')
             self.ax.set_xlabel('日期')
             self.ax.set_ylabel('比值')
             self.ax.legend()
@@ -977,8 +1120,7 @@ class IndexCompareTab(ttk.Frame):
         if not self._candidates:
             messagebox.showinfo('提示', '请先开始对比选择指数')
             return
-        base_label = self.base_var.get() or self.index_options[0][0]
-        base_code = dict(self.index_options).get(base_label, self.index_options[0][1])
+        base_code = self.base_code or ''
         code = self._candidates[self._pos]
         start = self.idx_start_var.get().strip()
         end = self.idx_end_var.get().strip()
@@ -988,12 +1130,14 @@ class IndexCompareTab(ttk.Frame):
             if df is None or df.empty:
                 messagebox.showinfo('提示', '当前没有可导出的数据')
                 return
-            path = filedialog.asksaveasfilename(title='导出对比数据', defaultextension='.csv', filetypes=[('CSV 文件', '*.csv')])
-            if not path:
-                return
+            import time
+            outdir = os.path.abspath(os.path.join(PROJECT_ROOT, 'output'))
+            os.makedirs(outdir, exist_ok=True)
+            ts = time.strftime('%Y%m%d_%H%M%S')
+            filename = f'index_compare_{base_code}_vs_{code}_{start}_{end}_{ts}.csv'
+            path = os.path.join(outdir, filename)
             df.to_csv(path, index=False, encoding='utf-8-sig')
             self.status.set(f'已导出指数对比数据：{path}')
-            self._open_path(path)
         except Exception as e:
             messagebox.showerror('导出失败', str(e))
 
@@ -1010,6 +1154,18 @@ class IndexCompareTab(ttk.Frame):
                 os.startfile(path)
             else:
                 subprocess.call(['xdg-open', path])
+        except Exception as e:
+            messagebox.showerror('保存失败', str(e))
+
+    def save_figure_quick(self, fig: Figure, base_name: str):
+        try:
+            import time
+            outdir = os.path.abspath(os.path.join(PROJECT_ROOT, 'output'))
+            os.makedirs(outdir, exist_ok=True)
+            ts = time.strftime('%Y%m%d_%H%M%S')
+            path = os.path.join(outdir, f'{base_name}_{ts}.png')
+            fig.savefig(path, dpi=150, bbox_inches='tight')
+            self.status.set(f'图像已保存：{path}')
         except Exception as e:
             messagebox.showerror('保存失败', str(e))
 
@@ -1046,16 +1202,14 @@ class BacktestTab(ttk.Frame):
         if self.app.sm.strategies:
             self.bt_strategy_combo.current(0)
         self.bt_strategy_combo.grid(row=0, column=5)
-        ttk.Label(top, text='时间(YYYYMMDD)').grid(row=0, column=6, padx=(16, 6))
+        ttk.Label(top, text='时间(YYYYMMDD)').grid(row=1, column=0, sticky='w', padx=6, pady=(6, 6))
         from datetime import date
         self.bt_start_var = StringVar(value='20240101')
-        ttk.Entry(top, textvariable=self.bt_start_var, width=12).grid(row=0, column=7)
+        ttk.Entry(top, textvariable=self.bt_start_var, width=12).grid(row=1, column=1)
         self.bt_end_var = StringVar(value=date.today().strftime('%Y%m%d'))
-        ttk.Entry(top, textvariable=self.bt_end_var, width=12).grid(row=0, column=8)
+        ttk.Entry(top, textvariable=self.bt_end_var, width=12).grid(row=1, column=2)
         self.bt_norm_var = BooleanVar(value=True)
-        ttk.Checkbutton(top, text='归一化净值', variable=self.bt_norm_var).grid(row=0, column=9, padx=(16, 6))
-        ttk.Button(top, text='今年初', command=self._set_bt_year_begin).grid(row=0, column=10, padx=(8, 4))
-        ttk.Button(top, text='今天', command=self._set_bt_today).grid(row=0, column=11)
+        ttk.Checkbutton(top, text='归一化净值', variable=self.bt_norm_var).grid(row=1, column=3, padx=(16, 6))
 
         # Pool info
         pool_frame = ttk.Frame(self)

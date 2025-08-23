@@ -185,17 +185,25 @@ class PortfolioManager:
         )
         return row['max_date'] if row and row.get('max_date') else None
 
-    def _trailing_stop_price(self, ts_code: str, start_date: Optional[str], end_date: Optional[str]) -> Optional[float]:
-        """Compute trailing stop as 15% below highest close since start_date (inclusive)."""
-        if not start_date or not end_date:
-            return None
-        rows = self.db.fetch_all(
-            "SELECT MAX(close) AS max_close FROM daily_price WHERE ts_code = ? AND date BETWEEN ? AND ?",
-            (ts_code, start_date, end_date)
-        )
-        if not rows or rows[0]['max_close'] is None:
-            return None
-        return float(rows[0]['max_close']) * 0.85
+    def _trailing_stop_price(self, ts_code: str, start_date: Optional[str], end_date: Optional[str], cost_price: Optional[float]) -> Optional[float]:
+        """跟踪止盈价：max( 买入后最高收盘价×85%, 买入价×92% )。
+        若无价格数据，且有买入价，则返回 买入价×92%；否则返回 None。
+        """
+        baseline = None
+        if cost_price is not None and cost_price > 0:
+            baseline = float(cost_price) * 0.92
+        max_close_val = None
+        if start_date and end_date:
+            rows = self.db.fetch_all(
+                "SELECT MAX(close) AS max_close FROM daily_price WHERE ts_code = ? AND date BETWEEN ? AND ?",
+                (ts_code, start_date, end_date)
+            )
+            if rows and rows[0]['max_close'] is not None:
+                max_close_val = float(rows[0]['max_close'])
+        if max_close_val is not None:
+            ts_val = max_close_val * 0.85
+            return max(ts_val, baseline) if baseline is not None else ts_val
+        return baseline
 
     def _ma_stop_price(self, ts_code: str, end_date: Optional[str], window: int = 20) -> Optional[float]:
         """Return the latest simple moving average price (e.g., 20D MA) as stop reference."""
@@ -367,7 +375,7 @@ class PortfolioManager:
             
             # Stop prices
             start_date = self._current_position_start_date(ts_code)
-            trailing_stop = self._trailing_stop_price(ts_code, start_date, latest_date)
+            trailing_stop = self._trailing_stop_price(ts_code, start_date, latest_date, cost_price=pos['cost'])
             ma20_stop = self._ma_stop_price(ts_code, latest_date, window=20)
 
             report['positions'].append({

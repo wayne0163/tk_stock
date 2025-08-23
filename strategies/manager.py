@@ -11,12 +11,10 @@ import logging
 class StrategyManager:
     def __init__(self, db: Database):
         self.db = db
-        # 先初始化strategy_modules字典
-        self.strategy_modules: Dict[str, Any] = {}
-        # 再调用_load_strategies方法
-        self.strategies: Dict[str, Type[bt.Strategy]] = self._load_strategies()
         # Map strategy name to its module to allow custom screening helpers
         self.strategy_modules: Dict[str, Any] = {}
+        # Load strategies and populate strategy_modules in _load_strategies
+        self.strategies: Dict[str, Type[bt.Strategy]] = self._load_strategies()
 
     def _load_strategies(self) -> Dict[str, Type[bt.Strategy]]:
         """动态加载所有策略类"""

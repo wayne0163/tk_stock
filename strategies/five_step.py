@@ -121,8 +121,18 @@ def screen_stock(df: pd.DataFrame):
     if len(df) < 240 + 1:
         return False
 
-    # 读取策略默认参数，确保与回测一致
-    params = dict(FiveStepStrategy.params)
+    # 使用与回测一致的默认参数（避免直接读取 backtrader params 导致的兼容性问题）
+    params = {
+        'ma_long_period': 240,
+        'ma_short_period_1': 60,
+        'ma_short_period_2': 20,
+        'price_increase_factor': 1.05,
+        'vol_multiplier': 1.2,
+        'rsi_period_1': 13,
+        'rsi_period_2': 6,
+        'rsi_buy_threshold_1': 50,
+        'rsi_buy_threshold_2': 60,
+    }
     ma240 = close.rolling(params['ma_long_period']).mean()
     ma60 = close.rolling(params['ma_short_period_1']).mean()
     ma20 = close.rolling(params['ma_short_period_2']).mean()
