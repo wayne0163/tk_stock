@@ -391,6 +391,37 @@ class PortfolioManager:
                 'target_price': pos.get('target_price') or 0.0,
             })
 
+        # 行业分布（供风险分析使用）：基于持仓市值按 stocks.industry 聚合
+        industry_distribution: Dict[str, float] = {}
+        if ts_codes:
+            try:
+                placeholders2 = ','.join('?' for _ in ts_codes)
+                rows_ind = self.db.fetch_all(
+                    f"SELECT ts_code, industry FROM stocks WHERE ts_code IN ({placeholders2})",
+                    tuple(ts_codes)
+                )
+                ind_map = {r['ts_code']: (r.get('industry') or '未知行业') for r in rows_ind}
+                # 聚合市值
+                for p in report['positions']:
+                    mv = float(p.get('market_value') or 0.0)
+                    if mv <= 0:
+                        continue
+                    ind = ind_map.get(p.get('ts_code'), '未知行业')
+                    industry_distribution[ind] = industry_distribution.get(ind, 0.0) + mv
+                # 转为百分比（占持仓总市值），若无持仓则为空
+                if total_investment_value > 0:
+                    industry_distribution = {k: (v / total_investment_value) * 100.0 for k, v in industry_distribution.items()}
+                else:
+                    industry_distribution = {}
+            except Exception:
+                # 任何异常下保守返回空分布
+                industry_distribution = {}
+
         total_portfolio_value = self.cash + total_investment_value
-        report['summary'] = {'total_value': total_portfolio_value, 'investment_value': total_investment_value, 'position_count': len(self.positions)}
+        report['summary'] = {
+            'total_value': total_portfolio_value,
+            'investment_value': total_investment_value,
+            'position_count': len(self.positions),
+            'industry_distribution': industry_distribution,
+        }
         return report

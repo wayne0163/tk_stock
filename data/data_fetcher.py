@@ -15,15 +15,28 @@ settings = get_settings()
 ts.set_token(settings.TUSHARE_TOKEN)
 pro = ts.pro_api()
 
+def _friendly_token_error() -> str:
+    return (
+        "未检测到有效的 Tushare Token。\n"
+        "请在环境变量或项目根目录 .env 中设置 TUSHARE_TOKEN=你的token，\n"
+        "然后重启应用。注册地址：https://tushare.pro/"
+    )
+
 class DataFetcher:
     DEFAULT_START_DATE = '20240101'
 
     def __init__(self, db: Database):
         self.db = db
 
+    def _ensure_token(self):
+        token = (settings.TUSHARE_TOKEN or '').strip()
+        if not token or token.lower() in {'your_default_token', 'xxx', 'token', 'your_token'}:
+            raise RuntimeError(_friendly_token_error())
+
     def update_all_stock_basics(self) -> int:
         """获取全市场股票基础信息"""
         try:
+            self._ensure_token()
             stock_basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,symbol,name,industry,area,list_date')
             if stock_basic.empty:
                 logging.getLogger(__name__).warning("未能获取到股票基础信息")
@@ -40,6 +53,7 @@ class DataFetcher:
         """获取并存储全市场所有指数（市场指数+申万行业指数）的基本信息。"""
         logging.getLogger(__name__).info("开始更新全市场指数基础信息...")
         try:
+            self._ensure_token()
             markets = ['CSI', 'SSE', 'SZSE', 'CICC', 'MSCI', 'OTH']
             market_indices_list = [pro.index_basic(market=market, fields='ts_code,name') for market in markets]
             df_sw = pro.index_basic(market='SW', fields='ts_code,name')
@@ -111,6 +125,7 @@ class DataFetcher:
     def update_watchlist_data(self, force_start_date: Optional[str] = None) -> int:
         """更新自选股列表中的股票行情和基本面数据"""
         logging.getLogger(__name__).info("开始更新自选股数据...")
+        self._ensure_token()
         watchlist = self.db.fetch_all("SELECT ts_code FROM watchlist")
         if not watchlist:
             logging.getLogger(__name__).info("自选股列表为空，无需更新。")
@@ -136,6 +151,7 @@ class DataFetcher:
     def update_index_watchlist_data(self, force_start_date: Optional[str] = None) -> int:
         """更新自选指数列表中的数据"""
         logging.getLogger(__name__).info("开始更新自选指数数据...")
+        self._ensure_token()
         watchlist = self.db.fetch_all("SELECT ts_code FROM index_watchlist")
         if not watchlist:
             logging.getLogger(__name__).info("自选指数列表为空，无需更新。")

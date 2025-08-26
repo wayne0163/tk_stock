@@ -160,11 +160,14 @@ class WeeklyMACDFilterStrategy(WaySsystemStrategy):
             vol_ok = (d.volume[0] > self.vol_ma3[d][0]) and (d.volume[0] > self.vol_ma18[d][0])
 
             if price_ok and vol_ok:
-                # 评分：越接近0轴越优先，量能越强越优先
-                zero_proximity = -abs(dif)  # 更接近0越大
+                # 评分：越接近0轴越优先（使用最近一次周线 DIF 近似），量能越强越优先；
+                # 同时最近一次是否金叉作为优先级因子。
+                last_dif = state.get('prev_dif')
+                zero_proximity = -abs(float(last_dif)) if last_dif is not None else 0.0
                 vol_ratio = 0.0
                 if self.vol_ma18[d][0] and self.vol_ma18[d][0] != 0:
                     vol_ratio = float(d.volume[0] / self.vol_ma18[d][0])
+                cond_week_cross = 1 if state.get('last_cross_up') else 0
                 score = (cond_week_cross, zero_proximity, vol_ratio)
                 candidates.append((score, d))
 
@@ -197,7 +200,10 @@ def screen_stock(df: pd.DataFrame, params: dict | None = None):
     df = df.sort_index().copy()
     p = params or {}
     valid_days = int(p.get('signal_valid_days', 3))
-    if len(df) < 240:
+    # 至少需要满足全局最小样本天数（便于计算长周期指标）
+    from config.settings import get_settings
+    settings = get_settings()
+    if len(df) < int(settings.MIN_REQUIRED_BARS):
         return {'passed': False}
 
     # 周线（以周五收盘聚合）

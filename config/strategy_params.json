@@ -1,0 +1,23 @@
+{
+  "strategy_params": {
+    "FiveStepStrategy": {
+      "ma_long_period": 240,
+      "ma_short_period_1": 60,
+      "ma_short_period_2": 20,
+      "price_increase_factor": 1.1,
+      "vol_multiplier": 1.5,
+      "rsi_period_1": 13,
+      "rsi_period_2": 6,
+      "rsi_buy_threshold_1": 50,
+      "rsi_buy_threshold_2": 60
+    },
+    "SMA20_120_VolStop30Strategy": {
+      "sma_fast": 20,
+      "sma_slow": 120,
+      "sma_stop": 30,
+      "vol_ma_short": 3,
+      "vol_ma_long": 18,
+      "signal_valid_days": 3
+    }
+  }
+}

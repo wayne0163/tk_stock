@@ -32,8 +32,6 @@ Thumbs.db
 *.db
 
 data/wayssystem.db
-data/常用指数20250807.csv
-data/自选股20250807.csv
 
 # 忽略输出文件
 output/

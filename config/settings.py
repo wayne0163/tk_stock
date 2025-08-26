@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     BACKTEST_START_DATE: str = "2024-01-01"
     BACKTEST_END_DATE: Optional[str] = None  # 默认到最新交易日
 
+    # 数据长度要求（用于指标窗口，如MA240等）
+    MIN_REQUIRED_BARS: int = 240  # 最长窗口长度（例如240日均线）
+
     # 策略配置
     STRATEGY_A_STOP_LOSS_RATE: float = 0.93  # 策略A止损率
     STRATEGY_A_TAKE_PROFIT_RATE: float = 0.15  # 策略A止盈率

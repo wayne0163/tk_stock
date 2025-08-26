@@ -101,7 +101,7 @@ def _rsi(series: pd.Series, period: int) -> pd.Series:
     return rsi.fillna(0)
 
 
-def screen_stock(df: pd.DataFrame):
+def screen_stock(df: pd.DataFrame, params: dict | None = None):
     """
     基于 FiveStep 策略的最后一日选股判定（与回测条件对齐）。
     入参 df: 索引为datetime，包含 open/high/low/close/volume 列。
@@ -118,12 +118,15 @@ def screen_stock(df: pd.DataFrame):
     close = df['close']
     volume = df['volume']
 
-    if len(df) < 240 + 1:
+    from config.settings import get_settings
+    settings = get_settings()
+    # 需满足全局最小样本天数 + 1（用于部分滞后比较）
+    if len(df) < int(settings.MIN_REQUIRED_BARS) + 1:
         return False
 
-    # 使用与回测一致的默认参数（避免直接读取 backtrader params 导致的兼容性问题）
-    params = {
-        'ma_long_period': 240,
+    # 使用与回测一致的默认参数，可被传入参数覆盖
+    defaults = {
+        'ma_long_period': int(settings.MIN_REQUIRED_BARS),
         'ma_short_period_1': 60,
         'ma_short_period_2': 20,
         'price_increase_factor': 1.05,
@@ -133,21 +136,22 @@ def screen_stock(df: pd.DataFrame):
         'rsi_buy_threshold_1': 50,
         'rsi_buy_threshold_2': 60,
     }
-    ma240 = close.rolling(params['ma_long_period']).mean()
-    ma60 = close.rolling(params['ma_short_period_1']).mean()
-    ma20 = close.rolling(params['ma_short_period_2']).mean()
+    p = {**defaults, **(params or {})}
+    ma240 = close.rolling(int(p['ma_long_period'])).mean()
+    ma60 = close.rolling(int(p['ma_short_period_1'])).mean()
+    ma20 = close.rolling(int(p['ma_short_period_2'])).mean()
     vol_sma20 = volume.rolling(20).mean()
-    rsi13 = _rsi(close, params['rsi_period_1'])
-    rsi6 = _rsi(close, params['rsi_period_2'])
+    rsi13 = _rsi(close, int(p['rsi_period_1']))
+    rsi6 = _rsi(close, int(p['rsi_period_2']))
 
     # 最新一日索引
     i = -1
     try:
         cond1 = ma240.iloc[i] > ma240.shift(1).iloc[i]
-        cond2 = close.iloc[i] >= close.shift(params['ma_long_period']).iloc[i] * params['price_increase_factor']
+        cond2 = close.iloc[i] >= close.shift(int(p['ma_long_period'])).iloc[i] * float(p['price_increase_factor'])
         cond3 = (ma60.iloc[i] > ma60.shift(1).iloc[i]) or (ma20.iloc[i] > ma20.shift(1).iloc[i])
-        cond4 = volume.iloc[i] > (vol_sma20.iloc[i] * params['vol_multiplier'] if not pd.isna(vol_sma20.iloc[i]) else np.inf)
-        cond5 = (rsi13.iloc[i] > params['rsi_buy_threshold_1']) and (rsi6.iloc[i] > params['rsi_buy_threshold_2'])
+        cond4 = volume.iloc[i] > (vol_sma20.iloc[i] * float(p['vol_multiplier']) if not pd.isna(vol_sma20.iloc[i]) else np.inf)
+        cond5 = (rsi13.iloc[i] > float(p['rsi_buy_threshold_1'])) and (rsi6.iloc[i] > float(p['rsi_buy_threshold_2']))
     except Exception:
         return False
 

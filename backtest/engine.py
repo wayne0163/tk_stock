@@ -173,7 +173,7 @@ def run_backtest(strategy_name: str, ts_codes: List[str], start_date: str, end_d
         query = "SELECT date, open, high, low, close, volume FROM daily_price WHERE ts_code = ? AND date BETWEEN ? AND ? ORDER BY date"
         df = pd.DataFrame(db.fetch_all(query, (ts_code, start_date, end_date)))
         # 需要至少满足最长指标窗口（本策略最长为240天）
-        if not df.empty and len(df) > 240:
+        if not df.empty and len(df) > int(settings.MIN_REQUIRED_BARS):
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
             data_feed = bt.feeds.PandasData(dataname=df)
@@ -284,5 +284,5 @@ def run_backtest(strategy_name: str, ts_codes: List[str], start_date: str, end_d
         'orders_csv': orders_csv_path,
         'included_ts_codes': included_ts_codes,
         'skipped_ts_codes': skipped_ts_codes,
-        'min_required_bars': 241
+        'min_required_bars': int(settings.MIN_REQUIRED_BARS) + 1
     }

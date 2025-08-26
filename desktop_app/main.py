@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import threading
 from datetime import datetime
@@ -26,6 +27,26 @@ from portfolio.manager import PortfolioManager
 from strategies.manager import StrategyManager
 from utils.code_processor import to_ts_code
 from risk.analyzer import RiskAnalyzer
+
+PARAMS_FILE = os.path.abspath(os.path.join(PROJECT_ROOT, 'config', 'strategy_params.json'))
+
+def _params_storage_load() -> dict:
+    try:
+        if os.path.exists(PARAMS_FILE):
+            with open(PARAMS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+def _params_storage_save(data: dict):
+    try:
+        os.makedirs(os.path.dirname(PARAMS_FILE), exist_ok=True)
+        with open(PARAMS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 
 # Configure Chinese fonts for Matplotlib (avoid garbled labels)
@@ -199,6 +220,12 @@ class WatchlistFrame(ttk.Frame):
         self.table_name = 'index_watchlist' if is_index else 'watchlist'
         self.type_name = '指数' if is_index else '股票'
 
+        # Stats section
+        stats_frame = ttk.LabelFrame(self, text='统计信息')
+        stats_frame.pack(fill='x', padx=10, pady=(8, 4))
+        self.stats_var = StringVar(value='-')
+        ttk.Label(stats_frame, textvariable=self.stats_var).pack(anchor='w', padx=8, pady=4)
+
         # Add single code
         add_frame = ttk.LabelFrame(self, text=f'手动添加自选{self.type_name}')
         add_frame.pack(fill='x', padx=10, pady=8)
@@ -215,6 +242,13 @@ class WatchlistFrame(ttk.Frame):
             csv_frame,
             text=("CSV需包含 'symbol' 列(6位股票代码)" if not is_index else "CSV需包含 'ts_code' 列")
         ).pack(side='left')
+
+        # Xueqiu helper (only for stock watchlist)
+        if not self.is_index:
+            btns = ttk.Frame(self)
+            btns.pack(fill='x', padx=10, pady=(0, 8))
+            ttk.Button(btns, text='获取雪球 Cookie 指南', command=self.show_xueqiu_help).pack(side='left')
+            ttk.Button(btns, text='从雪球下载自选...', command=self.download_xueqiu_watchlist).pack(side='left', padx=8)
 
         # Table
         table_frame = ttk.Frame(self)
@@ -257,6 +291,22 @@ class WatchlistFrame(ttk.Frame):
         for row in rows:
             vals = (row['ts_code'], row['name'], int(row['in_pool'] or 0))
             self.tree.insert('', END, values=vals)
+        self._update_stats()
+
+    def _update_stats(self):
+        try:
+            row = self.app.db.fetch_one(
+                f"SELECT COUNT(*) as total, SUM(CASE WHEN in_pool=1 THEN 1 ELSE 0 END) as in_pool FROM {self.table_name}"
+            )
+            total = int(row.get('total') or 0)
+            in_pool = int(row.get('in_pool') or 0)
+            if self.is_index:
+                txt = f"自选指数：{total} 个 | 轮播池：{in_pool} 个"
+            else:
+                txt = f"自选股票：{total} 只 | 回测池：{in_pool} 只"
+            self.stats_var.set(txt)
+        except Exception:
+            self.stats_var.set('统计信息不可用')
 
     def add_code(self):
         code = self.code_var.get().strip()
@@ -377,6 +427,48 @@ class WatchlistFrame(ttk.Frame):
         self.status.set(f"已清空所有自选{self.type_name}。")
         self.refresh()
 
+    # ------ Xueqiu helpers ------
+    def show_xueqiu_help(self):
+        txt = (
+            '如何获取雪球 Cookie:\n\n'
+            '1) 使用浏览器登录 https://xueqiu.com/；\n'
+            '2) 打开开发者工具(Chrome: F12)，切换至 Network 面板；\n'
+            '3) 刷新页面；任意点击一个请求(例如对 xueqiu.com 的接口请求)；\n'
+            '4) 在该请求的 Request Headers 中找到 "Cookie" 项，复制其完整内容；\n'
+            '5) 回到本应用，点击“从雪球下载自选...”，将 Cookie 粘贴进去并确认；\n'
+            '6) 程序会下载自选列表到 data/watchlist.csv（symbol 为6位数字代码），\n'
+            '   随后可使用“选择CSV文件...”导入。\n\n'
+            '提示：Cookie 必须包含 xq_a_token、u、device_id 等字段。若下载失败，\n'
+            '请确认 Cookie 有效后重试。'
+        )
+        win = Toplevel(self)
+        win.title('雪球 Cookie 获取说明')
+        frm = ttk.Frame(win)
+        frm.pack(fill='both', expand=True, padx=10, pady=10)
+        lbl = ttk.Label(frm, text=txt, justify='left', anchor='w')
+        lbl.configure(wraplength=640)
+        lbl.pack(fill='both', expand=True)
+        ttk.Button(frm, text='关闭', command=win.destroy).pack(anchor='e', pady=(8, 0))
+
+    def download_xueqiu_watchlist(self):
+        try:
+            cookie = simpledialog.askstring('从雪球下载', '请粘贴浏览器中复制的 Cookie：')
+            if not cookie:
+                return
+            script_path = os.path.abspath(os.path.join(PROJECT_ROOT, 'utils', 'download_xueqiu_watchlist.py'))
+            out_path = os.path.abspath(os.path.join(PROJECT_ROOT, 'data', 'watchlist.csv'))
+            import subprocess, sys
+            cmd = [sys.executable, script_path, '--cookie', cookie, '--output', out_path]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                msg = proc.stderr.strip() or proc.stdout.strip() or '未知错误'
+                messagebox.showerror('下载失败', msg)
+                return
+            self.status.set(f'雪球自选已保存至 {out_path}')
+            messagebox.showinfo('完成', f'已保存到：\n{out_path}\n\n可点击“选择CSV文件...”进行导入。')
+        except Exception as e:
+            messagebox.showerror('错误', str(e))
+
 
 class WatchlistTab(ttk.Frame):
     def __init__(self, master, app: AppState, status: StatusBar):
@@ -486,6 +578,11 @@ class PortfolioTab(ttk.Frame):
             ttk.Label(snap_frame, textvariable=self.snap_var).pack(side='left')
 
             # No inline NAV chart by default; shown in popup when needed
+            # 自动刷新一次投资组合报告，进入页面即展示最新数据
+            try:
+                self.refresh_report()
+            except Exception:
+                pass
 
     def initialize_cash(self):
         try:
@@ -604,7 +701,7 @@ class PortfolioTab(ttk.Frame):
             if hasattr(self, 'pos_ax') and hasattr(self, 'pos_fig') and hasattr(self, 'pos_canvas'):
                 self.pos_ax.clear()
                 if positions:
-                    labels = [p.get('name') or p.get('ts_code') for p in positions]
+                    labels = [f"{(p.get('name') or p.get('ts_code'))}({p.get('ts_code')})" for p in positions]
                     sizes = [max(float(p.get('market_value') or 0), 0.0) for p in positions]
                     total = sum(sizes)
                     if total > 0:
@@ -750,7 +847,7 @@ class PortfolioTab(ttk.Frame):
             fig = Figure(figsize=(6.0, 4.0), dpi=100)
             ax = fig.add_subplot(111)
             if positions:
-                labels = [p.get('name') or p.get('ts_code') for p in positions]
+                labels = [f"{(p.get('name') or p.get('ts_code'))}({p.get('ts_code')})" for p in positions]
                 sizes = [max(float(p.get('market_value') or 0), 0.0) for p in positions]
                 total = sum(sizes)
                 if total > 0:
@@ -773,6 +870,13 @@ class PortfolioTab(ttk.Frame):
     def open_nav_curve_window(self):
         try:
             df = self.app.pm.get_snapshots()
+            # 若暂无快照，自动尝试重建一次
+            if df is None or df.empty:
+                try:
+                    self.app.pm.rebuild_snapshots()
+                except Exception:
+                    pass
+                df = self.app.pm.get_snapshots()
             win = Toplevel(self)
             win.title('组合净值曲线')
             fig = Figure(figsize=(7.5, 4.0), dpi=100)
@@ -829,6 +933,11 @@ class StrategyTab(ttk.Frame):
         super().__init__(master)
         self.app = app
         self.status = status
+        self._chart_win = None
+        self._chart_codes = []
+        self._chart_pos = 0
+        self._chart_days = 240  # default window
+        self._saved_params_store = _params_storage_load()
 
         top = ttk.Frame(self)
         top.pack(fill='x', padx=10, pady=8)
@@ -841,6 +950,17 @@ class StrategyTab(ttk.Frame):
         self.strategy_combo.pack(side='left', padx=8)
         ttk.Button(top, text='开始选股', command=self.run_screening).pack(side='left')
 
+        # Dynamic parameter panel for selected strategy
+        self.param_frame = ttk.LabelFrame(self, text='策略参数')
+        self.param_frame.pack(fill='x', padx=10, pady=(4, 0))
+        self.param_vars = {}
+        try:
+            self.strategy_combo.bind('<<ComboboxSelected>>', lambda e: self._rebuild_param_form())
+        except Exception:
+            pass
+        # Build initial form
+        self._rebuild_param_form()
+
         # Results table
         table_frame = ttk.Frame(self)
         table_frame.pack(fill='both', expand=True, padx=10, pady=8)
@@ -852,6 +972,14 @@ class StrategyTab(ttk.Frame):
         scrollbar = ttk.Scrollbar(table_frame, orient='vertical', command=self.tree.yview)
         self.tree.configure(yscroll=scrollbar.set)
         scrollbar.pack(side='right', fill='y')
+
+        # Double-click to open chart; and controls row for navigation
+        self.tree.bind('<Double-1>', self._on_result_dblclick)
+        ctrl_row = ttk.Frame(self)
+        ctrl_row.pack(fill='x', padx=10, pady=(0, 6))
+        ttk.Button(ctrl_row, text='查看所选个股K线', command=self.open_selected_chart).pack(side='left')
+        ttk.Button(ctrl_row, text='上一个', command=lambda: self.carousel(-1)).pack(side='left', padx=6)
+        ttk.Button(ctrl_row, text='下一个', command=lambda: self.carousel(1)).pack(side='left')
 
         hint = ttk.Label(self, text='提示：选股基于自选股池（在“自选列表管理”中配置），请先更新行情数据。')
         hint.pack(anchor='w', padx=12, pady=(0, 8))
@@ -875,20 +1003,150 @@ class StrategyTab(ttk.Frame):
             return
         codes = [row['ts_code'] for row in stocks]
 
+        # Collect params from UI
+        params = self._collect_params()
+
+        # Persist as default for next time
+        try:
+            store = _params_storage_load()
+            root = store.get('strategy_params') or {}
+            root[name] = params
+            store['strategy_params'] = root
+            _params_storage_save(store)
+            self._saved_params_store = store
+        except Exception:
+            pass
+
         def task():
             self.status.set(f"正在运行选股：{name}，股票数：{len(codes)} ...")
-            results = self.app.sm.run_screening(name, codes, strategy_params=None)
+            results = self.app.sm.run_screening(name, codes, strategy_params=params)
             self.status.set(f"选股完成，入选 {len(results)} 只。")
             # populate table on UI thread
             self.tree.after(0, self._fill_results, results)
         self._start_busy('正在运行选股...')
         threading.Thread(target=lambda: (task(), self._end_busy()), daemon=True).start()
 
+    # ---- Strategy params helpers ----
+    def _param_specs(self):
+        """Return param spec for current strategy: {key: (label, type, default)}"""
+        name = self.strategy_var.get() or ''
+        specs = {}
+        if name == 'SMA20_120_VolStop30Strategy':
+            specs = {
+                'sma_fast': ('快线SMA', int, 20),
+                'sma_slow': ('慢线SMA', int, 120),
+                'sma_stop': ('止损SMA', int, 30),
+                'vol_ma_short': ('量MA短', int, 3),
+                'vol_ma_long': ('量MA长', int, 18),
+                'signal_valid_days': ('信号有效天数', int, 3),
+            }
+        elif name == 'FiveStepStrategy':
+            specs = {
+                'ma_long_period': ('长均线周期', int, 240),
+                'ma_short_period_1': ('短均线1', int, 60),
+                'ma_short_period_2': ('短均线2', int, 20),
+                'price_increase_factor': ('240日涨幅阈值(倍数)', float, 1.05),
+                'vol_multiplier': ('放量倍数(相对MA20)', float, 1.2),
+                'rsi_period_1': ('RSI周期1', int, 13),
+                'rsi_period_2': ('RSI周期2', int, 6),
+                'rsi_buy_threshold_1': ('RSI阈值1', int, 50),
+                'rsi_buy_threshold_2': ('RSI阈值2', int, 60),
+            }
+        elif name == 'WeeklyMACDFilterStrategy':
+            specs = {
+                'signal_valid_days': ('周线信号有效天数', int, 3),
+            }
+        return specs
+
+    def _rebuild_param_form(self):
+        for w in self.param_frame.winfo_children():
+            w.destroy()
+        self.param_vars = {}
+        specs = self._param_specs()
+        if not specs:
+            ttk.Label(self.param_frame, text='该策略无可调参数').pack(anchor='w', padx=8, pady=4)
+            return
+        # Buttons row
+        btnrow = ttk.Frame(self.param_frame)
+        btnrow.pack(fill='x', padx=8, pady=(6, 0))
+        ttk.Button(btnrow, text='恢复默认', command=self._reset_params_to_default).pack(side='left')
+        ttk.Button(btnrow, text='保存为默认', command=self._save_current_params_as_default).pack(side='left', padx=8)
+        # Grid inputs
+        grid = ttk.Frame(self.param_frame)
+        grid.pack(fill='x', padx=8, pady=6)
+        r = 0
+        saved = (self._saved_params_store or {}).get('strategy_params', {}).get(self.strategy_var.get() or '', {})
+        for key, (label, typ, default) in specs.items():
+            ttk.Label(grid, text=f'{label}:').grid(row=r, column=0, sticky='w', padx=(0, 6), pady=3)
+            init_val = saved.get(key, default)
+            var = StringVar(value=str(init_val))
+            ent = ttk.Entry(grid, textvariable=var, width=12)
+            ent.grid(row=r, column=1, sticky='w')
+            self.param_vars[key] = (var, typ)
+            r += 1
+
+    def _collect_params(self):
+        params = {}
+        for key, (var, typ) in (self.param_vars or {}).items():
+            txt = (var.get() or '').strip()
+            if txt == '':
+                continue
+            try:
+                if typ is int:
+                    params[key] = int(float(txt))
+                elif typ is float:
+                    params[key] = float(txt)
+                else:
+                    params[key] = txt
+            except Exception:
+                # ignore invalid; use implicit defaults in strategy
+                pass
+        return params
+
+    def _reset_params_to_default(self):
+        # Recreate form with defaults (ignore saved values)
+        for w in self.param_frame.winfo_children():
+            w.destroy()
+        self.param_vars = {}
+        specs = self._param_specs()
+        if not specs:
+            ttk.Label(self.param_frame, text='该策略无可调参数').pack(anchor='w', padx=8, pady=4)
+            return
+        btnrow = ttk.Frame(self.param_frame)
+        btnrow.pack(fill='x', padx=8, pady=(6, 0))
+        ttk.Button(btnrow, text='恢复默认', command=self._reset_params_to_default).pack(side='left')
+        ttk.Button(btnrow, text='保存为默认', command=self._save_current_params_as_default).pack(side='left', padx=8)
+        grid = ttk.Frame(self.param_frame)
+        grid.pack(fill='x', padx=8, pady=6)
+        r = 0
+        for key, (label, typ, default) in specs.items():
+            ttk.Label(grid, text=f'{label}:').grid(row=r, column=0, sticky='w', padx=(0, 6), pady=3)
+            var = StringVar(value=str(default))
+            ttk.Entry(grid, textvariable=var, width=12).grid(row=r, column=1, sticky='w')
+            self.param_vars[key] = (var, typ)
+            r += 1
+
+    def _save_current_params_as_default(self):
+        name = self.strategy_var.get() or ''
+        if not name:
+            return
+        params = self._collect_params()
+        store = _params_storage_load()
+        root = store.get('strategy_params') or {}
+        root[name] = params
+        store['strategy_params'] = root
+        _params_storage_save(store)
+        self._saved_params_store = store
+        self.status.set('策略参数已保存为默认')
+
     def _fill_results(self, rows):
         for item in self.tree.get_children():
             self.tree.delete(item)
         for r in rows:
             self.tree.insert('', END, values=(r.get('ts_code'), r.get('name'), r.get('signal_date')))
+        # cache codes for carousel
+        self._chart_codes = [r.get('ts_code') for r in rows if r.get('ts_code')]
+        self._chart_pos = 0
 
     def _start_busy(self, msg: str):
         self._busy_label_var.set(msg)
@@ -900,6 +1158,125 @@ class StrategyTab(ttk.Frame):
             self._busy_bar.stop()
             self._busy_frame.forget()
         self.after(0, stop)
+
+    # ---- Chart helpers ----
+    def _on_result_dblclick(self, _event=None):
+        self.open_selected_chart()
+
+    def open_selected_chart(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo('提示', '请先在表格中选择一个股票')
+            return
+        item = sel[0]
+        vals = self.tree.item(item, 'values')
+        if not vals:
+            return
+        code = vals[0]
+        try:
+            self._chart_codes = [self.tree.item(i, 'values')[0] for i in self.tree.get_children()]
+        except Exception:
+            self._chart_codes = [code]
+        try:
+            self._chart_pos = self._chart_codes.index(code)
+        except Exception:
+            self._chart_pos = 0
+        self._open_chart_window()
+
+    def carousel(self, step: int):
+        if not self._chart_codes:
+            # If not opened before, try build from table then open first
+            try:
+                self._chart_codes = [self.tree.item(i, 'values')[0] for i in self.tree.get_children()]
+            except Exception:
+                return
+        if not self._chart_codes:
+            return
+        self._chart_pos = (self._chart_pos + step) % len(self._chart_codes)
+        self._open_chart_window(reuse=True)
+
+    def _open_chart_window(self, reuse: bool = False):
+        import matplotlib.dates as mdates
+        from matplotlib.patches import Rectangle
+        # Build or reuse window
+        if not reuse or self._chart_win is None or not self._chart_win.winfo_exists():
+            self._chart_win = Toplevel(self)
+            self._chart_win.title('个股K线与成交量')
+            # Create figure
+            fig = Figure(figsize=(8.0, 5.0), dpi=100)
+            ax_price = fig.add_subplot(211)
+            ax_vol = fig.add_subplot(212, sharex=ax_price)
+            self._chart_fig = fig
+            self._chart_ax_price = ax_price
+            self._chart_ax_vol = ax_vol
+            self._chart_canvas = FigureCanvasTkAgg(fig, master=self._chart_win)
+            self._chart_canvas.get_tk_widget().pack(fill='both', expand=True)
+            # Buttons
+            row = ttk.Frame(self._chart_win)
+            row.pack(fill='x')
+            ttk.Button(row, text='上一个', command=lambda: self.carousel(-1)).pack(side='left', padx=8, pady=6)
+            ttk.Button(row, text='下一个', command=lambda: self.carousel(1)).pack(side='left')
+            ttk.Button(row, text='保存PNG', command=lambda: self.save_figure(self._chart_fig, 'stock_kline.png')).pack(side='left', padx=8)
+            # Range toggle
+            ttk.Label(row, text='区间:').pack(side='left', padx=(16, 4))
+            ttk.Button(row, text='120日', command=lambda: self._set_chart_days(120)).pack(side='left')
+            ttk.Button(row, text='240日', command=lambda: self._set_chart_days(240)).pack(side='left', padx=(4, 0))
+        code = self._chart_codes[self._chart_pos]
+        # Query last N days (use 240 as default)
+        N = int(self._chart_days or 240)
+        rows = self.app.db.fetch_all(
+            "SELECT date, open, high, low, close, volume FROM daily_price WHERE ts_code = ? ORDER BY date DESC LIMIT ?",
+            (code, N)
+        )
+        if not rows:
+            messagebox.showinfo('提示', f'{code} 暂无行情数据，请先更新。')
+            return
+        import pandas as pd
+        df = pd.DataFrame(rows)
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date')
+        # Draw candlestick
+        axp = self._chart_ax_price; axv = self._chart_ax_vol
+        axp.clear(); axv.clear()
+        # pandas Series does not have to_pydatetime() directly; use .dt accessor
+        x = mdates.date2num(df['date'].dt.to_pydatetime())
+        for xi, o, h, l, c in zip(x, df['open'], df['high'], df['low'], df['close']):
+            color = 'red' if c >= o else 'green'
+            axp.vlines(xi, l, h, color=color, linewidth=1)
+            y0 = min(o, c); height = abs(c - o)
+            if height == 0:
+                height = 0.001  # draw a tiny bar for doji
+                y0 = o - height/2
+            rect = Rectangle((xi - 0.3, y0), 0.6, height, facecolor=color, edgecolor=color, linewidth=0.5)
+            axp.add_patch(rect)
+        # Title with stock name + code
+        try:
+            row = self.app.db.fetch_one("SELECT name FROM stocks WHERE ts_code = ?", (code,))
+            name = (row or {}).get('name') or code
+        except Exception:
+            name = code
+        axp.set_title(f'{name}({code}) K线')
+        axp.grid(True, linestyle='--', alpha=0.3)
+        axp.xaxis_date()
+        axp.set_ylabel('价格')
+        # Volume bars
+        colors = ['red' if c >= o else 'green' for o, c in zip(df['open'], df['close'])]
+        axv.bar(df['date'], df['volume'], color=colors, width=0.6)
+        axv.set_ylabel('成交量')
+        axv.grid(True, linestyle='--', alpha=0.2)
+        self._chart_fig.tight_layout()
+        self._chart_canvas.draw()
+
+    def _set_chart_days(self, n: int):
+        try:
+            n = int(n)
+        except Exception:
+            n = 240
+        if n <= 0:
+            n = 240
+        self._chart_days = n
+        # redraw current
+        self._open_chart_window(reuse=True)
 
 
 class IndexCompareTab(ttk.Frame):
@@ -1035,7 +1412,9 @@ class IndexCompareTab(ttk.Frame):
                 if len(v) >= 4:
                     v[3] = '●' if v[0] == code else ''
                     self.listbox.item(it, values=v)
-            self.status.set(f'已设置基准指数：{code}')
+            # Show name+code in status if available
+            base_name = vals[1] if len(vals) >= 2 else code
+            self.status.set(f'已设置基准指数：{base_name}({code})')
 
     def _set_start_year_begin(self):
         from datetime import date
@@ -1102,14 +1481,20 @@ class IndexCompareTab(ttk.Frame):
                 self.ax.plot(df['date'], df['c_ma60'], label='MA60')
                 indicators.append('MA60')
             ind_text = ', '.join(indicators)
-            self.ax.set_title(f'{code} vs {base_code} | 指标: {ind_text}')
+            # Display index names instead of codes in the chart title
+            base_row = self.app.db.fetch_one("SELECT name FROM indices WHERE ts_code = ?", (base_code,))
+            code_row = self.app.db.fetch_one("SELECT name FROM indices WHERE ts_code = ?", (code,))
+            base_name = (base_row or {}).get('name') or base_code
+            code_name = (code_row or {}).get('name') or code
+            self.ax.set_title(f'{code_name}({code}) vs {base_name}({base_code}) | 指标: {ind_text}')
             self.ax.set_xlabel('日期')
             self.ax.set_ylabel('比值')
             self.ax.legend()
             latest = df.iloc[-1]
             latest_date = latest['date'].strftime('%Y-%m-%d') if hasattr(latest['date'], 'strftime') else str(latest['date'])
             latest_ratio = latest['ratio_c']
-            self.curr_label.set(f'当前对比：{code}（{self._pos+1}/{len(self._candidates)}） 截止{latest_date} 比值 {latest_ratio:.3f}')
+            # Also show names in the current label
+            self.curr_label.set(f'当前对比：{code_name}({code})（{self._pos+1}/{len(self._candidates)}） 截止{latest_date} 比值 {latest_ratio:.3f}')
             self.canvas.draw()
         except Exception as e:
             messagebox.showerror('错误', str(e))
@@ -1181,6 +1566,124 @@ class IndexCompareTab(ttk.Frame):
         self.after(0, stop)
 
 
+class SystemStatsTab(ttk.Frame):
+    def __init__(self, master, app: AppState, status: StatusBar):
+        super().__init__(master)
+        self.app = app
+        self.status = status
+        self.vars = {
+            'stocks': StringVar(value='-'),
+            'indices': StringVar(value='-'),
+            'watchlist_stock': StringVar(value='-'),
+            'watchlist_index': StringVar(value='-'),
+            'price_stock': StringVar(value='-'),
+            'price_index': StringVar(value='-'),
+            'portfolio': StringVar(value='-'),
+            'db': StringVar(value='-'),
+            'token': StringVar(value='-'),
+        }
+
+        # Controls
+        ctrl = ttk.Frame(self)
+        ctrl.pack(fill='x', padx=10, pady=(8, 4))
+        ttk.Button(ctrl, text='刷新统计', command=self.refresh_stats).pack(side='left')
+
+        # Token / 数据源
+        src = ttk.LabelFrame(self, text='数据源状态')
+        src.pack(fill='x', padx=10, pady=6)
+        ttk.Label(src, textvariable=self.vars['token']).pack(anchor='w', padx=8, pady=4)
+
+        # 基础数据
+        base = ttk.LabelFrame(self, text='基础数据规模')
+        base.pack(fill='x', padx=10, pady=6)
+        ttk.Label(base, textvariable=self.vars['stocks']).pack(anchor='w', padx=8, pady=2)
+        ttk.Label(base, textvariable=self.vars['indices']).pack(anchor='w', padx=8, pady=2)
+
+        # 自选清单
+        wl = ttk.LabelFrame(self, text='自选清单')
+        wl.pack(fill='x', padx=10, pady=6)
+        ttk.Label(wl, textvariable=self.vars['watchlist_stock']).pack(anchor='w', padx=8, pady=2)
+        ttk.Label(wl, textvariable=self.vars['watchlist_index']).pack(anchor='w', padx=8, pady=2)
+
+        # 行情覆盖
+        px = ttk.LabelFrame(self, text='行情覆盖（日线）')
+        px.pack(fill='x', padx=10, pady=6)
+        ttk.Label(px, textvariable=self.vars['price_stock']).pack(anchor='w', padx=8, pady=2)
+        ttk.Label(px, textvariable=self.vars['price_index']).pack(anchor='w', padx=8, pady=2)
+
+        # 投资组合
+        pf = ttk.LabelFrame(self, text='投资组合状态')
+        pf.pack(fill='x', padx=10, pady=6)
+        ttk.Label(pf, textvariable=self.vars['portfolio']).pack(anchor='w', padx=8, pady=2)
+
+        # 数据库
+        dbf = ttk.LabelFrame(self, text='数据库')
+        dbf.pack(fill='x', padx=10, pady=(6, 10))
+        ttk.Label(dbf, textvariable=self.vars['db']).pack(anchor='w', padx=8, pady=2)
+
+        self.refresh_stats()
+
+    def refresh_stats(self):
+        try:
+            # Token 状态
+            token = (self.app.settings.TUSHARE_TOKEN or '').strip()
+            token_ok = bool(token) and token.lower() not in {'your_default_token', 'xxx', 'token', 'your_token'}
+            self.vars['token'].set(f"Tushare Token：{'已配置' if token_ok else '未配置'}")
+
+            # 基础数据
+            row = self.app.db.fetch_one("SELECT COUNT(*) AS c FROM stocks")
+            sc = int(row.get('c') or 0)
+            self.vars['stocks'].set(f"股票基础信息：{sc} 条")
+            row = self.app.db.fetch_one("SELECT COUNT(*) AS c FROM indices")
+            ic = int(row.get('c') or 0)
+            self.vars['indices'].set(f"指数基础信息：{ic} 条")
+
+            # 自选清单
+            row = self.app.db.fetch_one("SELECT COUNT(*) AS total, SUM(CASE WHEN in_pool=1 THEN 1 ELSE 0 END) AS in_pool FROM watchlist")
+            total = int((row or {}).get('total') or 0); in_pool = int((row or {}).get('in_pool') or 0)
+            self.vars['watchlist_stock'].set(f"自选股票：{total} 只 | 回测池：{in_pool} 只")
+            row = self.app.db.fetch_one("SELECT COUNT(*) AS total, SUM(CASE WHEN in_pool=1 THEN 1 ELSE 0 END) AS in_pool FROM index_watchlist")
+            total_i = int((row or {}).get('total') or 0); in_pool_i = int((row or {}).get('in_pool') or 0)
+            self.vars['watchlist_index'].set(f"自选指数：{total_i} 个 | 轮播池：{in_pool_i} 个")
+
+            # 行情覆盖（stock）
+            row = self.app.db.fetch_one("SELECT COUNT(*) AS rows, COUNT(DISTINCT ts_code) AS symbols, MAX(date) AS latest FROM daily_price")
+            if row:
+                self.vars['price_stock'].set(f"股票日线：{int(row.get('rows') or 0)} 行 | 覆盖 {int(row.get('symbols') or 0)} 标的 | 最近交易日 {row.get('latest') or '-'}")
+            else:
+                self.vars['price_stock'].set("股票日线：-")
+            # 行情覆盖（index）
+            row = self.app.db.fetch_one("SELECT COUNT(*) AS rows, COUNT(DISTINCT ts_code) AS symbols, MAX(date) AS latest FROM index_daily_price")
+            if row:
+                self.vars['price_index'].set(f"指数日线：{int(row.get('rows') or 0)} 行 | 覆盖 {int(row.get('symbols') or 0)} 指数 | 最近交易日 {row.get('latest') or '-'}")
+            else:
+                self.vars['price_index'].set("指数日线：-")
+
+            # 投资组合
+            rep = self.app.pm.generate_portfolio_report()
+            s = rep.get('summary', {})
+            if self.app.pm.is_initialized():
+                self.vars['portfolio'].set(
+                    f"总资产：¥{s.get('total_value', 0):.2f} | 现金：¥{rep.get('cash', 0):.2f} | 持仓市值：¥{s.get('investment_value', 0):.2f} | 持仓数：{s.get('position_count', 0)}"
+                )
+            else:
+                self.vars['portfolio'].set("组合：未初始化")
+
+            # DB 文件大小
+            try:
+                import os
+                db_path = self.app.db.db_path
+                size_mb = os.path.getsize(db_path) / (1024 * 1024)
+                self.vars['db'].set(f"数据库文件：{db_path} | 大小：{size_mb:.1f} MB")
+            except Exception:
+                self.vars['db'].set("数据库文件：-")
+
+            self.status.set('系统统计已刷新')
+        except Exception as e:
+            self.status.set('系统统计刷新失败')
+            messagebox.showerror('错误', str(e))
+
+
 class BacktestTab(ttk.Frame):
     def __init__(self, master, app: AppState, status: StatusBar):
         super().__init__(master)
@@ -1202,6 +1705,11 @@ class BacktestTab(ttk.Frame):
         if self.app.sm.strategies:
             self.bt_strategy_combo.current(0)
         self.bt_strategy_combo.grid(row=0, column=5)
+        # Dynamic strategy params for backtest
+        try:
+            self.bt_strategy_combo.bind('<<ComboboxSelected>>', lambda e: self._bt_rebuild_param_form())
+        except Exception:
+            pass
         ttk.Label(top, text='时间(YYYYMMDD)').grid(row=1, column=0, sticky='w', padx=6, pady=(6, 6))
         from datetime import date
         self.bt_start_var = StringVar(value='20240101')
@@ -1210,6 +1718,13 @@ class BacktestTab(ttk.Frame):
         ttk.Entry(top, textvariable=self.bt_end_var, width=12).grid(row=1, column=2)
         self.bt_norm_var = BooleanVar(value=True)
         ttk.Checkbutton(top, text='归一化净值', variable=self.bt_norm_var).grid(row=1, column=3, padx=(16, 6))
+
+        # Backtest strategy parameter panel
+        self.bt_param_frame = ttk.LabelFrame(self, text='策略参数')
+        self.bt_param_frame.pack(fill='x', padx=10, pady=(0, 4))
+        self._bt_param_vars = {}
+        self._bt_saved_params_store = _params_storage_load()
+        self._bt_rebuild_param_form()
 
         # Pool info
         pool_frame = ttk.Frame(self)
@@ -1274,11 +1789,24 @@ class BacktestTab(ttk.Frame):
             messagebox.showwarning('提示', '回测池为空，请先在自选股中选择回测池')
             return
 
+        # Collect params
+        bt_params = self._bt_collect_params()
+        # Persist as default for next time
+        try:
+            store = _params_storage_load()
+            root = store.get('strategy_params') or {}
+            root[strategy] = bt_params
+            store['strategy_params'] = root
+            _params_storage_save(store)
+            self._bt_saved_params_store = store
+        except Exception:
+            pass
+
         def task():
             from backtest.engine import run_backtest
             self.status.set('正在运行回测，请稍候...')
             try:
-                result = run_backtest(strategy, codes, start, end, init_cap, maxpos, self.bt_norm_var.get(), strategy_params=None)
+                result = run_backtest(strategy, codes, start, end, init_cap, maxpos, self.bt_norm_var.get(), strategy_params=bt_params)
             except Exception as e:
                 self.status.set('回测失败')
                 messagebox.showerror('错误', str(e))
@@ -1319,6 +1847,129 @@ class BacktestTab(ttk.Frame):
             self.bt_canvas.get_tk_widget().after(0, draw)
         self._start_busy('正在运行回测...')
         threading.Thread(target=lambda: (task(), self._end_busy()), daemon=True).start()
+
+    # ---- Backtest strategy params helpers ----
+    def _bt_param_specs(self):
+        name = self.bt_strategy_var.get() or ''
+        # Reuse the same definitions as StrategyTab
+        specs = {}
+        if name == 'SMA20_120_VolStop30Strategy':
+            specs = {
+                'sma_fast': ('快线SMA', int, 20),
+                'sma_slow': ('慢线SMA', int, 120),
+                'sma_stop': ('止损SMA', int, 30),
+                'vol_ma_short': ('量MA短', int, 3),
+                'vol_ma_long': ('量MA长', int, 18),
+                'signal_valid_days': ('信号有效天数', int, 3),
+            }
+        elif name == 'FiveStepStrategy':
+            specs = {
+                'ma_long_period': ('长均线周期', int, 240),
+                'ma_short_period_1': ('短均线1', int, 60),
+                'ma_short_period_2': ('短均线2', int, 20),
+                'price_increase_factor': ('240日涨幅阈值(倍数)', float, 1.05),
+                'vol_multiplier': ('放量倍数(相对MA20)', float, 1.2),
+                'rsi_period_1': ('RSI周期1', int, 13),
+                'rsi_period_2': ('RSI周期2', int, 6),
+                'rsi_buy_threshold_1': ('RSI阈值1', int, 50),
+                'rsi_buy_threshold_2': ('RSI阈值2', int, 60),
+            }
+        elif name == 'WeeklyMACDFilterStrategy':
+            specs = {
+                'signal_valid_days': ('周线信号有效天数', int, 3),
+            }
+        return specs
+
+    def _bt_rebuild_param_form(self):
+        for w in self.bt_param_frame.winfo_children():
+            w.destroy()
+        self._bt_param_vars = {}
+        specs = self._bt_param_specs()
+        if not specs:
+            ttk.Label(self.bt_param_frame, text='该策略无可调参数').pack(anchor='w', padx=8, pady=4)
+            return
+        # Buttons row
+        btnrow = ttk.Frame(self.bt_param_frame)
+        btnrow.pack(fill='x', padx=8, pady=(6, 0))
+        ttk.Button(btnrow, text='恢复默认', command=self._bt_reset_params_to_default).pack(side='left')
+        ttk.Button(btnrow, text='保存为默认', command=self._bt_save_current_params_as_default).pack(side='left', padx=8)
+        # Grid
+        grid = ttk.Frame(self.bt_param_frame)
+        grid.pack(fill='x', padx=8, pady=6)
+        r = 0
+        c = 0
+        saved = (self._bt_saved_params_store or {}).get('strategy_params', {}).get(self.bt_strategy_var.get() or '', {})
+        for key, (label, typ, default) in specs.items():
+            frm = ttk.Frame(grid)
+            frm.grid(row=r, column=c, sticky='w', padx=(0, 16), pady=3)
+            ttk.Label(frm, text=f'{label}:').pack(side='left')
+            init_val = saved.get(key, default)
+            var = StringVar(value=str(init_val))
+            ttk.Entry(frm, textvariable=var, width=12).pack(side='left', padx=(6, 0))
+            self._bt_param_vars[key] = (var, typ)
+            c += 1
+            if c >= 4:
+                c = 0
+                r += 1
+
+    def _bt_collect_params(self):
+        params = {}
+        for key, (var, typ) in (self._bt_param_vars or {}).items():
+            txt = (var.get() or '').strip()
+            if txt == '':
+                continue
+            try:
+                if typ is int:
+                    params[key] = int(float(txt))
+                elif typ is float:
+                    params[key] = float(txt)
+                else:
+                    params[key] = txt
+            except Exception:
+                pass
+        return params
+
+    def _bt_reset_params_to_default(self):
+        # rebuild with defaults only
+        for w in self.bt_param_frame.winfo_children():
+            w.destroy()
+        self._bt_param_vars = {}
+        specs = self._bt_param_specs()
+        if not specs:
+            ttk.Label(self.bt_param_frame, text='该策略无可调参数').pack(anchor='w', padx=8, pady=4)
+            return
+        btnrow = ttk.Frame(self.bt_param_frame)
+        btnrow.pack(fill='x', padx=8, pady=(6, 0))
+        ttk.Button(btnrow, text='恢复默认', command=self._bt_reset_params_to_default).pack(side='left')
+        ttk.Button(btnrow, text='保存为默认', command=self._bt_save_current_params_as_default).pack(side='left', padx=8)
+        grid = ttk.Frame(self.bt_param_frame)
+        grid.pack(fill='x', padx=8, pady=6)
+        r = 0
+        c = 0
+        for key, (label, typ, default) in specs.items():
+            frm = ttk.Frame(grid)
+            frm.grid(row=r, column=c, sticky='w', padx=(0, 16), pady=3)
+            ttk.Label(frm, text=f'{label}:').pack(side='left')
+            var = StringVar(value=str(default))
+            ttk.Entry(frm, textvariable=var, width=12).pack(side='left', padx=(6, 0))
+            self._bt_param_vars[key] = (var, typ)
+            c += 1
+            if c >= 4:
+                c = 0
+                r += 1
+
+    def _bt_save_current_params_as_default(self):
+        name = self.bt_strategy_var.get() or ''
+        if not name:
+            return
+        params = self._bt_collect_params()
+        store = _params_storage_load()
+        root = store.get('strategy_params') or {}
+        root[name] = params
+        store['strategy_params'] = root
+        _params_storage_save(store)
+        self._bt_saved_params_store = store
+        self.status.set('回测策略参数已保存为默认')
 
     def save_bt_figure(self):
         path = filedialog.asksaveasfilename(title='保存图像', initialfile='backtest.png', defaultextension='.png', filetypes=[('PNG 图片', '*.png')])
@@ -1466,6 +2117,7 @@ class MainApp(Tk):
         self.index_compare_tab = IndexCompareTab(nb, self.app, self.status)
         self.backtest_tab = BacktestTab(nb, self.app, self.status)
         self.risk_tab = RiskTab(nb, self.app, self.status)
+        self.system_stats_tab = SystemStatsTab(nb, self.app, self.status)
 
         nb.add(self.data_tab, text='数据管理')
         nb.add(self.watchlist_tab, text='自选列表管理')
@@ -1474,6 +2126,7 @@ class MainApp(Tk):
         nb.add(self.index_compare_tab, text='指数对比')
         nb.add(self.backtest_tab, text='回测引擎')
         nb.add(self.risk_tab, text='风险分析')
+        nb.add(self.system_stats_tab, text='系统统计')
 
         # Exit button
         toolbar = ttk.Frame(self)

@@ -1,6 +1,7 @@
 import backtrader as bt
 from .base import WaySsystemStrategy
 import pandas as pd
+from config.settings import get_settings
 
 
 class SMA20_120_VolStop30Strategy(WaySsystemStrategy):
@@ -110,8 +111,10 @@ def screen_stock(df: pd.DataFrame, params: dict | None = None):
     vol_ma_long = int(p.get('vol_ma_long', 18))
     valid_days = int(p.get('signal_valid_days', 3))
 
-    # 至少 240 日样本且满足慢线窗口
-    if len(df) < 240 or len(df) < (sma_slow + 1):
+    # 至少满足全局最小样本天数，且满足慢线窗口
+    settings = get_settings()
+    min_bars = int(settings.MIN_REQUIRED_BARS)
+    if len(df) < min_bars or len(df) < (sma_slow + 1):
         return {'passed': False}
 
     close = df['close']

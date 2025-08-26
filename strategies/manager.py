@@ -5,6 +5,7 @@ import pandas as pd
 from typing import Dict, Type, List, Any
 from datetime import datetime, timedelta
 from data.database import Database
+from config.settings import get_settings
 import backtrader as bt
 import logging
 
@@ -15,6 +16,7 @@ class StrategyManager:
         self.strategy_modules: Dict[str, Any] = {}
         # Load strategies and populate strategy_modules in _load_strategies
         self.strategies: Dict[str, Type[bt.Strategy]] = self._load_strategies()
+        self.settings = get_settings()
 
     def _load_strategies(self) -> Dict[str, Type[bt.Strategy]]:
         """动态加载所有策略类"""
@@ -55,11 +57,12 @@ class StrategyManager:
         for ts_code in ts_codes:
             # 获取单个股票的最新数据 (例如，过去一年的数据)
             end_date = datetime.now().strftime('%Y%m%d')
+            # 要求至少 MIN_REQUIRED_BARS + 一些缓冲；按一年回看已足够
             start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
             query = "SELECT date, open, high, low, close, volume FROM daily_price WHERE ts_code = ? AND date BETWEEN ? AND ? ORDER BY date"
             df = pd.DataFrame(self.db.fetch_all(query, (ts_code, start_date, end_date)))
             
-            if df.empty or len(df) < 240: # 确保有足够的数据来计算指标
+            if df.empty or len(df) < int(self.settings.MIN_REQUIRED_BARS): # 确保有足够的数据来计算指标
                 continue
 
             df['date'] = pd.to_datetime(df['date'])
