@@ -3,7 +3,7 @@ import json
 import sys
 import threading
 from datetime import datetime
-from tkinter import Tk, StringVar, IntVar, BooleanVar, END, messagebox, filedialog, Toplevel
+from tkinter import Tk, StringVar, IntVar, BooleanVar, END, messagebox, filedialog, Toplevel, Menu
 from tkinter import simpledialog
 from tkinter import ttk
 
@@ -12,6 +12,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import matplotlib.ticker as mtick
 from matplotlib import font_manager, rcParams
+import matplotlib.dates as mdates
 import subprocess
 
 # Ensure project root on sys.path
@@ -498,24 +499,19 @@ class PortfolioTab(ttk.Frame):
             ttk.Entry(init_frame, textvariable=self.init_cash_var, width=16).pack(side='left')
             ttk.Button(init_frame, text='开始交易', command=self.initialize_cash).pack(side='left', padx=8)
         else:
-            trade_frame = ttk.LabelFrame(self, text='手动交易')
-            trade_frame.pack(fill='x', padx=10, pady=8)
-            ttk.Label(trade_frame, text='股票代码(6位或ts_code)：').grid(row=0, column=0, sticky='w', padx=6, pady=6)
-            self.trade_code_var = StringVar()
-            ttk.Entry(trade_frame, textvariable=self.trade_code_var, width=18).grid(row=0, column=1)
-            ttk.Label(trade_frame, text='交易类型：').grid(row=0, column=2, padx=(16, 6))
-            self.trade_type_var = StringVar(value='买入')
-            ttk.Combobox(trade_frame, textvariable=self.trade_type_var, values=['买入', '卖出'], width=6, state='readonly').grid(row=0, column=3)
-            ttk.Label(trade_frame, text='价格：').grid(row=0, column=4, padx=(16, 6))
-            self.trade_price_var = StringVar()
-            ttk.Entry(trade_frame, textvariable=self.trade_price_var, width=10).grid(row=0, column=5)
-            ttk.Label(trade_frame, text='数量：').grid(row=0, column=6, padx=(16, 6))
-            self.trade_qty_var = StringVar()
-            ttk.Entry(trade_frame, textvariable=self.trade_qty_var, width=10).grid(row=0, column=7)
-            ttk.Label(trade_frame, text='目标价(价值止盈)：').grid(row=0, column=8, padx=(16, 6))
-            self.trade_target_var = StringVar()
-            ttk.Entry(trade_frame, textvariable=self.trade_target_var, width=10).grid(row=0, column=9)
-            ttk.Button(trade_frame, text='执行交易', command=self.execute_trade).grid(row=0, column=10, padx=(16, 6))
+            # 基础样式微调
+            try:
+                style = ttk.Style()
+                style.configure('TButton', padding=(8, 4))
+            except Exception:
+                pass
+            quick_frame = ttk.LabelFrame(self, text='快捷交易')
+            quick_frame.pack(fill='x', padx=10, pady=8)
+            # 快速操作：买入 / 存入现金 / 取出现金 / 全部卖出
+            ttk.Button(quick_frame, text='买入', command=self._open_quick_trade_from_button).pack(side='left', padx=6, pady=6)
+            ttk.Button(quick_frame, text='存入现金', command=self.deposit_cash).pack(side='left', padx=6)
+            ttk.Button(quick_frame, text='取出现金', command=self.withdraw_cash).pack(side='left', padx=6)
+            ttk.Button(quick_frame, text='全部卖出(按最新价)', command=self.sell_all_positions).pack(side='left', padx=(12, 6))
 
             # Split layout: top report + bottom NAV area
             paned = ttk.Panedwindow(self, orient='vertical')
@@ -531,8 +527,12 @@ class PortfolioTab(ttk.Frame):
             rep_frame.pack(fill='both', expand=True)
             btn_row = ttk.Frame(rep_frame)
             btn_row.pack(fill='x')
+            # 报告与持仓/导出/图表操作（同一行排列相近属性）
             ttk.Button(btn_row, text='刷新投资组合报告', command=self.refresh_report).pack(side='left', padx=8, pady=6)
-            ttk.Button(btn_row, text='编辑目标价', command=self.edit_target_price).pack(side='left')
+            ttk.Button(btn_row, text='编辑目标价', command=self.edit_target_price).pack(side='left', padx=(0, 6))
+            ttk.Button(btn_row, text='查看持仓分布图', command=self.open_positions_pie_window).pack(side='left', padx=(10, 6))
+            ttk.Button(btn_row, text='导出持仓明细CSV', command=self.export_positions_csv).pack(side='left', padx=(0, 6))
+            ttk.Button(btn_row, text='指标说明', command=self.show_indicator_help).pack(side='left', padx=(10, 0))
             self.summary_var = StringVar(value='未生成报告')
             ttk.Label(rep_frame, textvariable=self.summary_var).pack(anchor='w', padx=8)
 
@@ -550,30 +550,23 @@ class PortfolioTab(ttk.Frame):
                 self.pos_tree.column(col, width=w, anchor='center')
             self.pos_tree.tag_configure('warn', foreground='red')
             self.pos_tree.pack(fill='both', expand=True, padx=8, pady=6)
+            # 双击持仓行 -> 打开快捷交易弹窗（默认卖出、默认数量为全部）
+            self.pos_tree.bind('<Double-1>', self._on_position_dblclick)
 
-            # Money & reports controls (split to two rows for small screens)
-            ctrl_row1 = ttk.Frame(rep_frame)
-            ctrl_row1.pack(fill='x', padx=8, pady=(0, 4))
-            ttk.Button(ctrl_row1, text='存入现金', command=self.deposit_cash).pack(side='left')
-            ttk.Button(ctrl_row1, text='取出现金', command=self.withdraw_cash).pack(side='left', padx=8)
-            ttk.Button(ctrl_row1, text='指标说明', command=self.show_indicator_help).pack(side='left', padx=(16, 0))
+            # 维护操作
+            maintain_row = ttk.Frame(rep_frame)
+            maintain_row.pack(fill='x', padx=8, pady=(0, 6))
+            ttk.Button(maintain_row, text='重置为未初始化', command=self.reset_portfolio).pack(side='left')
 
-            ctrl_row2 = ttk.Frame(rep_frame)
-            ctrl_row2.pack(fill='x', padx=8, pady=(0, 6))
-            ttk.Button(ctrl_row2, text='全部卖出(按最新价)', command=self.sell_all_positions).pack(side='left')
-            ttk.Button(ctrl_row2, text='重置为未初始化', command=self.reset_portfolio).pack(side='left', padx=8)
-
-            # Positions distribution (popup)
-            pie_container = ttk.Frame(rep_frame)
-            pie_container.pack(fill='x', padx=8, pady=4)
-            ttk.Button(pie_container, text='查看持仓分布图', command=self.open_positions_pie_window).pack(side='left')
-            ttk.Button(pie_container, text='导出持仓明细CSV', command=self.export_positions_csv).pack(side='left', padx=8)
+            # 右键菜单：持仓列表快捷操作
+            self._init_positions_context_menu()
 
             # NAV area (in lower pane)
             snap_frame = ttk.LabelFrame(lower, text='净值快照')
             snap_frame.pack(fill='x')
             ttk.Button(snap_frame, text='重建净值快照', command=self.rebuild_snapshots).pack(side='left', padx=8, pady=6)
             ttk.Button(snap_frame, text='查看净值曲线', command=self.open_nav_curve_window).pack(side='left')
+            ttk.Button(snap_frame, text='补记起始现金流', command=self.add_initial_cashflow).pack(side='left', padx=8)
             self.snap_var = StringVar(value='')
             ttk.Label(snap_frame, textvariable=self.snap_var).pack(side='left')
 
@@ -597,33 +590,9 @@ class PortfolioTab(ttk.Frame):
             w.destroy()
         self._build()
 
+    # Deprecated inline form replaced by modal-based quick trade
     def execute_trade(self):
-        code_input = self.trade_code_var.get().strip()
-        price_txt = self.trade_price_var.get().strip()
-        qty_txt = self.trade_qty_var.get().strip()
-        if not code_input or not price_txt or not qty_txt:
-            messagebox.showwarning('提示', '股票代码、价格和数量均为必填项')
-            return
-        try:
-            price = float(price_txt)
-            qty = float(qty_txt)
-            target_txt = self.trade_target_var.get().strip() if hasattr(self, 'trade_target_var') else ''
-            target_price = float(target_txt) if target_txt else None
-        except ValueError:
-            messagebox.showwarning('提示', '价格与数量需为数字')
-            return
-        side = 'buy' if self.trade_type_var.get() == '买入' else 'sell'
-        ts_code_to_trade = to_ts_code(code_input)
-        try:
-            # Enforce target price on buy if required
-            if side == 'buy' and (target_price is None or target_price <= 0):
-                messagebox.showwarning('提示', '买入时需填写有效的目标价（价值止盈）。')
-                return
-            self.app.pm.add_trade(side=side, ts_code=ts_code_to_trade, price=price, qty=qty, target_price=target_price)
-            self.status.set(f"交易执行成功: {self.trade_type_var.get()} {qty} 股 {ts_code_to_trade}")
-            self.refresh_report()
-        except Exception as e:
-            messagebox.showerror('交易失败', str(e))
+        messagebox.showinfo('提示', '请使用“快捷交易”中的“买入”按钮或在持仓列表中双击个股进行交易。')
 
     def refresh_report(self):
         rep = self.app.pm.generate_portfolio_report()
@@ -693,6 +662,24 @@ class PortfolioTab(ttk.Frame):
         # draw latest curve
         self.draw_nav_curve()
 
+    def add_initial_cashflow(self):
+        try:
+            dt = simpledialog.askstring('补记起始现金流', '日期(YYYYMMDD)：')
+            if not dt:
+                return
+            if not (len(dt) == 8 and dt.isdigit()):
+                messagebox.showwarning('提示', '请输入有效的8位日期，如 20240105')
+                return
+            amt = simpledialog.askfloat('补记起始现金流', '金额（正为存入，负为取出）：')
+            if amt is None:
+                return
+            self.app.pm.record_cash_flow(amount=float(amt), date=dt, note='补记起始现金流')
+            days = self.app.pm.rebuild_snapshots(start_date=dt)
+            self.status.set(f'已补记现金流并重建快照 {days} 天')
+            self.snap_var.set(f"已生成 {days} 天的组合净值快照。")
+        except Exception as e:
+            messagebox.showerror('操作失败', str(e))
+
     def draw_positions_pie(self, report=None):
         try:
             rep = report or self.app.pm.generate_portfolio_report()
@@ -716,6 +703,258 @@ class PortfolioTab(ttk.Frame):
         except Exception as e:
             messagebox.showerror('绘图失败', str(e))
 
+    def _init_positions_context_menu(self):
+        try:
+            self.pos_menu = Menu(self, tearoff=0)
+            self.pos_menu.add_command(label='快速买入…', command=self._cm_buy_selected)
+            self.pos_menu.add_command(label='快速卖出…', command=self._cm_sell_selected)
+            self.pos_menu.add_separator()
+            self.pos_menu.add_command(label='编辑目标价…', command=self._cm_edit_target_selected)
+            self.pos_menu.add_command(label='导出该持仓CSV', command=self.export_selected_position_csv)
+            self.pos_tree.bind('<Button-3>', self._show_pos_menu)
+        except Exception:
+            pass
+
+    def _show_pos_menu(self, event):
+        try:
+            row_id = self.pos_tree.identify_row(event.y)
+            if row_id:
+                # Select the row under cursor
+                self.pos_tree.selection_set(row_id)
+            self.pos_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self.pos_menu.grab_release()
+            except Exception:
+                pass
+
+    def _cm_buy_selected(self):
+        try:
+            sel = self.pos_tree.selection()
+            if not sel:
+                return
+            vals = self.pos_tree.item(sel[0], 'values')
+            if not vals:
+                return
+            ts_code = vals[0]
+            name = vals[1] if len(vals) > 1 else ''
+            self._open_quick_trade_modal(ts_code=ts_code, name=name, pos_qty=None, default_side='买入')
+        except Exception as e:
+            messagebox.showerror('错误', str(e))
+
+    def _cm_sell_selected(self):
+        try:
+            sel = self.pos_tree.selection()
+            if not sel:
+                return
+            vals = self.pos_tree.item(sel[0], 'values')
+            if not vals:
+                return
+            ts_code = vals[0]
+            name = vals[1] if len(vals) > 1 else ''
+            qty_str = vals[2] if len(vals) > 2 else '0'
+            try:
+                pos_qty = float(qty_str)
+            except Exception:
+                try:
+                    pos_qty = float(qty_str.replace(',', ''))
+                except Exception:
+                    pos_qty = 0.0
+            self._open_quick_trade_modal(ts_code=ts_code, name=name, pos_qty=pos_qty, default_side='卖出')
+        except Exception as e:
+            messagebox.showerror('错误', str(e))
+
+    def _cm_edit_target_selected(self):
+        self.edit_target_price()
+
+    def export_selected_position_csv(self):
+        try:
+            sel = self.pos_tree.selection()
+            if not sel:
+                messagebox.showinfo('提示', '请先选择一条持仓记录')
+                return
+            vals = self.pos_tree.item(sel[0], 'values')
+            if not vals:
+                messagebox.showinfo('提示', '无法读取选中行')
+                return
+            ts_code = vals[0]
+            rep = self.app.pm.generate_portfolio_report()
+            positions = rep.get('positions') or []
+            pos = None
+            for p in positions:
+                if (p.get('ts_code') or '') == ts_code:
+                    pos = p
+                    break
+            if not pos:
+                messagebox.showinfo('提示', '未找到对应持仓详情')
+                return
+            import pandas as pd, time
+            outdir = os.path.abspath(os.path.join(PROJECT_ROOT, 'output'))
+            os.makedirs(outdir, exist_ok=True)
+            ts = time.strftime('%Y%m%d_%H%M%S')
+            path = os.path.join(outdir, f'position_{ts_code}_{ts}.csv')
+            pd.DataFrame([pos]).to_csv(path, index=False, encoding='utf-8-sig')
+            self.status.set(f'已导出持仓至 {path}')
+        except Exception as e:
+            messagebox.showerror('导出失败', str(e))
+    # ---- Positions quick trade modal ----
+    def _open_quick_trade_from_button(self):
+        # 默认买入，允许在弹窗内切换
+        self._open_quick_trade_modal(ts_code=None, name='', pos_qty=None, default_side='买入')
+
+    def _on_position_dblclick(self, event=None):
+        try:
+            item_id = self.pos_tree.identify_row(event.y) if event else (self.pos_tree.selection()[0] if self.pos_tree.selection() else None)
+            if not item_id:
+                return
+            vals = self.pos_tree.item(item_id, 'values')
+            if not vals:
+                return
+            ts_code = vals[0]
+            name = vals[1] if len(vals) > 1 else ''
+            qty_str = vals[2] if len(vals) > 2 else '0'
+            try:
+                pos_qty = float(qty_str)
+            except Exception:
+                try:
+                    pos_qty = float(qty_str.replace(',', ''))
+                except Exception:
+                    pos_qty = 0.0
+            self._open_quick_trade_modal(ts_code=ts_code, name=name, pos_qty=pos_qty, default_side='卖出')
+        except Exception as e:
+            messagebox.showerror('错误', str(e))
+
+    def _open_quick_trade_modal(self, ts_code=None, name='', pos_qty=None, default_side='卖出'):
+        try:
+            win = Toplevel(self)
+            title_code = ts_code or '(未指定)'
+            win.title(f'快捷交易 - {name or title_code}')
+            win.grab_set()
+
+            # 行1：代码 + 名称（若未传代码，则提供输入框）
+            row1 = ttk.Frame(win)
+            row1.pack(fill='x', padx=10, pady=(10, 4))
+            ttk.Label(row1, text='股票：').pack(side='left')
+            code_var = StringVar(value=ts_code or '')
+            if ts_code:
+                ttk.Label(row1, text=f'{ts_code}{" (" + name + ")" if name else ""}').pack(side='left', padx=(4, 0))
+            else:
+                code_entry = ttk.Entry(row1, textvariable=code_var, width=18)
+                code_entry.pack(side='left', padx=(4, 0))
+
+            # 行2：交易方向、价格、数量
+            row2 = ttk.Frame(win)
+            row2.pack(fill='x', padx=10, pady=4)
+            ttk.Label(row2, text='交易类型：').pack(side='left')
+            trade_type_var = StringVar(value=default_side)
+            trade_type_cb = ttk.Combobox(row2, textvariable=trade_type_var, values=['买入', '卖出'], width=6, state='readonly')
+            trade_type_cb.pack(side='left', padx=(4, 12))
+
+            ttk.Label(row2, text='价格：').pack(side='left')
+            price_var = StringVar(value='')
+            ttk.Entry(row2, textvariable=price_var, width=10).pack(side='left', padx=(4, 12))
+
+            ttk.Label(row2, text='数量：').pack(side='left')
+            qty_var = StringVar(value='')
+            qty_entry = ttk.Entry(row2, textvariable=qty_var, width=10)
+            qty_entry.pack(side='left', padx=(4, 12))
+
+            # 行3：仅买入时需要目标价
+            row3 = ttk.Frame(win)
+            row3.pack(fill='x', padx=10, pady=4)
+            ttk.Label(row3, text='目标价(买入必填)：').pack(side='left')
+            target_var = StringVar(value='')
+            target_entry = ttk.Entry(row3, textvariable=target_var, width=12)
+            target_entry.pack(side='left', padx=(4, 12))
+
+            def set_qty_default_for_sell():
+                # 若有持仓数量，用其作为默认；否则尝试根据代码查询现有持仓
+                nonlocal pos_qty
+                if pos_qty is not None and pos_qty > 0:
+                    v = int(pos_qty) if abs(pos_qty - int(pos_qty)) < 1e-6 else pos_qty
+                    qty_var.set(str(v))
+                    return
+                code_input = code_var.get().strip()
+                if not code_input:
+                    return
+                try:
+                    c = to_ts_code(code_input)
+                except Exception:
+                    c = code_input
+                pos = self.app.pm.positions.get(c)
+                if pos and float(pos.get('qty') or 0) > 0:
+                    q = float(pos['qty'])
+                    v = int(q) if abs(q - int(q)) < 1e-6 else q
+                    qty_var.set(str(v))
+
+            def on_type_change(event=None):
+                t = trade_type_var.get()
+                if t == '卖出':
+                    set_qty_default_for_sell()
+                else:
+                    qty_var.set('')
+
+            trade_type_cb.bind('<<ComboboxSelected>>', on_type_change)
+            if not ts_code:
+                def on_code_change(event=None):
+                    if trade_type_var.get() == '卖出':
+                        set_qty_default_for_sell()
+                if 'code_entry' in locals():
+                    code_entry.bind('<FocusOut>', on_code_change)
+                    code_entry.bind('<KeyRelease>', on_code_change)
+
+            # 行4：确认 / 取消
+            row4 = ttk.Frame(win)
+            row4.pack(fill='x', padx=10, pady=(6, 10))
+
+            def do_confirm():
+                side = 'buy' if trade_type_var.get() == '买入' else 'sell'
+                code_txt = code_var.get().strip()
+                if not code_txt:
+                    messagebox.showwarning('提示', '请填写股票代码')
+                    return
+                ts_code_to_trade = to_ts_code(code_txt)
+                price_txt = price_var.get().strip()
+                qty_txt = qty_var.get().strip()
+                tgt_txt = target_var.get().strip()
+                if not price_txt or not qty_txt:
+                    messagebox.showwarning('提示', '价格与数量均为必填项')
+                    return
+                try:
+                    price = float(price_txt)
+                    qty = float(qty_txt)
+                except ValueError:
+                    messagebox.showwarning('提示', '价格与数量需为数字')
+                    return
+                target_price = None
+                if side == 'buy':
+                    if not tgt_txt:
+                        messagebox.showwarning('提示', '买入时需填写有效的目标价。')
+                        return
+                    try:
+                        target_price = float(tgt_txt)
+                    except ValueError:
+                        messagebox.showwarning('提示', '目标价需为数字')
+                        return
+                    if target_price <= 0:
+                        messagebox.showwarning('提示', '目标价必须为正数')
+                        return
+                try:
+                    self.app.pm.add_trade(side=side, ts_code=ts_code_to_trade, price=price, qty=qty, target_price=target_price)
+                    self.status.set(f"交易执行成功: {trade_type_var.get()} {qty} 股 {ts_code_to_trade}")
+                    self.refresh_report()
+                    win.destroy()
+                except Exception as e:
+                    messagebox.showerror('交易失败', str(e))
+
+            ttk.Button(row4, text='确认', command=do_confirm).pack(side='left')
+            ttk.Button(row4, text='取消', command=win.destroy).pack(side='left', padx=(8, 0))
+
+            # 初始状态
+            on_type_change()
+        except Exception as e:
+            messagebox.showerror('错误', str(e))
+
     def draw_nav_curve(self):
         try:
             df = self.app.pm.get_snapshots()
@@ -724,7 +963,11 @@ class PortfolioTab(ttk.Frame):
                 self.nav_ax.clear()
                 if df is not None and not df.empty:
                     s = df['total_value']
-                    self.nav_ax.plot(s.index, s.values, label='组合净值')
+                    self.nav_ax.plot(s.index, s.values, label='组合净值', color='royalblue')
+                    # 仅按日期刻度显示
+                    self.nav_ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                    self.nav_ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+                    self.nav_fig.autofmt_xdate()
                     self.nav_ax.set_title('组合净值曲线')
                     self.nav_ax.set_xlabel('日期')
                     self.nav_ax.set_ylabel('总资产')
@@ -879,20 +1122,81 @@ class PortfolioTab(ttk.Frame):
                 df = self.app.pm.get_snapshots()
             win = Toplevel(self)
             win.title('组合净值曲线')
+            ctrl = ttk.Frame(win)
+            ctrl.pack(fill='x', padx=8, pady=(6, 0))
+            ttk.Label(ctrl, text='基准指数：').pack(side='left')
+            candidates = ['000300.SH', '000905.SH', '000001.SH', '399006.SZ']
+            try:
+                # 若数据库有indices表，动态补充一些候选
+                rows = self.app.db.fetch_all("SELECT ts_code FROM indices LIMIT 10")
+                for r in rows:
+                    c = r.get('ts_code')
+                    if c and c not in candidates:
+                        candidates.append(c)
+            except Exception:
+                pass
+            default_bm = getattr(self.app.settings, 'BENCHMARK_INDEX', None) or '000300.SH'
+            bm_var = StringVar(value=default_bm if default_bm in candidates else candidates[0])
+            bm_cb = ttk.Combobox(ctrl, textvariable=bm_var, values=candidates, width=12, state='readonly')
+            bm_cb.pack(side='left', padx=(4, 8))
+            ttk.Button(ctrl, text='刷新', command=lambda: render(bm_var.get())).pack(side='left')
+
             fig = Figure(figsize=(7.5, 4.0), dpi=100)
             ax = fig.add_subplot(111)
-            if df is not None and not df.empty:
-                s = df['total_value']
-                ax.plot(s.index, s.values, label='组合净值')
-                ax.set_title('组合净值曲线')
-                ax.set_xlabel('日期')
-                ax.set_ylabel('总资产')
-                ax.legend()
-            else:
-                ax.text(0.5, 0.5, '暂无快照数据，请先重建。', ha='center', va='center')
+
+            def render(benchmark: str):
+                ax.clear()
+                if df is not None and not df.empty:
+                    s = df['total_value']
+                    ax.plot(s.index, s.values, label='组合净值', color='royalblue')
+                    # 基准
+                    try:
+                        start = s.index.min().strftime('%Y%m%d')
+                        end = s.index.max().strftime('%Y%m%d')
+                        rows = self.app.db.fetch_all(
+                            "SELECT date, close FROM index_daily_price WHERE ts_code = ? AND date BETWEEN ? AND ? ORDER BY date",
+                            (benchmark, start, end)
+                        )
+                        import pandas as pd
+                        bdf = pd.DataFrame(rows)
+                        if not bdf.empty:
+                            bdf['date'] = pd.to_datetime(bdf['date'])
+                            bdf.set_index('date', inplace=True)
+                            b = bdf['close'].astype(float)
+                            b = (b / b.iloc[0]) * s.iloc[0]
+                            ax.plot(b.index, b.values, label=f'基准({benchmark})', color='gray', linestyle='--')
+                    except Exception:
+                        pass
+                    # 现金流标注
+                    try:
+                        flows = self.app.pm.get_cash_flows()
+                        if flows:
+                            import pandas as pd
+                            fdf = pd.DataFrame(flows)
+                            fdf['date'] = pd.to_datetime(fdf['date'])
+                            fdf = fdf[(fdf['date'] >= s.index.min()) & (fdf['date'] <= s.index.max())]
+                            if not fdf.empty:
+                                y = s.reindex(fdf['date']).ffill().values
+                                pos_mask = fdf['amount'] > 0
+                                neg_mask = fdf['amount'] < 0
+                                ax.scatter(fdf['date'][pos_mask], y[pos_mask], color='green', marker='^', label='现金流入')
+                                ax.scatter(fdf['date'][neg_mask], y[neg_mask], color='red', marker='v', label='现金流出')
+                    except Exception:
+                        pass
+                    ax.set_title('组合净值曲线（含基准与现金流标注）')
+                    ax.set_xlabel('日期')
+                    ax.set_ylabel('总资产')
+                    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+                    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+                    fig.autofmt_xdate()
+                    ax.legend()
+                else:
+                    ax.text(0.5, 0.5, '暂无快照数据，请先重建。', ha='center', va='center')
+                canvas.draw()
+
             canvas = FigureCanvasTkAgg(fig, master=win)
             canvas.get_tk_widget().pack(fill='both', expand=True)
-            canvas.draw()
+            render(bm_var.get())
             row = ttk.Frame(win)
             row.pack(fill='x')
             ttk.Button(row, text='保存PNG', command=lambda: self.save_figure(fig, 'nav_curve.png')).pack(side='left', padx=8, pady=6)

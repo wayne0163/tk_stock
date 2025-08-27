@@ -18,6 +18,11 @@ class PortfolioManager:
     def initialize_cash(self, amount: float):
         self.cash = amount
         self.save_portfolio()
+        # 记录初始现金为一笔现金流入
+        try:
+            self.record_cash_flow(amount=amount, note='初始化资金')
+        except Exception:
+            pass
 
     def reset_portfolio(self):
         self.db.execute("DELETE FROM trades WHERE portfolio_name = ?", (self.portfolio_name,))
@@ -64,6 +69,35 @@ class PortfolioManager:
             raise ValueError(f"Not enough cash to withdraw.")
         self.cash += amount
         self.save_portfolio()
+        # 记录现金流（正为存入，负为取出）
+        self.record_cash_flow(amount)
+        # 增量更新净值快照
+        try:
+            self.rebuild_snapshots_incremental()
+        except Exception:
+            pass
+
+    def record_cash_flow(self, amount: float, date: Optional[str] = None, note: Optional[str] = None):
+        """记录现金流（存入为正、取出为负），用于净值快照重建与图表标注。"""
+        if not self.is_initialized():
+            raise ValueError("Portfolio not initialized.")
+        date = date or datetime.now().strftime('%Y%m%d')
+        self.db.execute(
+            "INSERT INTO cash_flows (portfolio_name, date, amount, note) VALUES (?, ?, ?, ?)",
+            (self.portfolio_name, date, float(amount), note or '')
+        )
+
+    def get_cash_flows(self, start_date: Optional[str] = None, end_date: Optional[str] = None):
+        q = "SELECT date, amount, note FROM cash_flows WHERE portfolio_name = ?"
+        params: list = [self.portfolio_name]
+        if start_date:
+            q += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            q += " AND date <= ?"
+            params.append(end_date)
+        q += " ORDER BY date"
+        return self.db.fetch_all(q, tuple(params))
 
     def sell_all_positions_at_market(self) -> int:
         """Sell all current positions using the latest available close price.
@@ -140,6 +174,11 @@ class PortfolioManager:
                 del self.positions[ts_code]
         self.db.execute("INSERT INTO trades (date, portfolio_name, ts_code, side, price, qty, fee) VALUES (?, ?, ?, ?, ?, ?, ?)", (date, self.portfolio_name, ts_code, side, price, qty, fee))
         self.save_portfolio()
+        # 增量更新净值快照
+        try:
+            self.rebuild_snapshots_incremental()
+        except Exception:
+            pass
 
     def set_target_price(self, ts_code: str, target_price: float):
         """Update target price for an existing position and persist it."""
@@ -242,18 +281,48 @@ class PortfolioManager:
         """
         trades = self.db.fetch_all("SELECT date, ts_code, side, price, qty, fee FROM trades WHERE portfolio_name = ? ORDER BY date", (self.portfolio_name,))
         if not trades:
-            return 0
+            # 即便没有交易，也尝试基于现金流生成净值（仅现金曲线）
+            flows = self.get_cash_flows()
+            if not flows:
+                return 0
+            # 构造仅现金的快照（用现金流日期近似作为时间轴）
+            import pandas as pd
+            fdf = pd.DataFrame(flows)
+            fdf['date'] = pd.to_datetime(fdf['date'])
+            fdf = fdf.sort_values('date')
+            cash = 0.0
+            snapshots = []
+            for _, row in fdf.iterrows():
+                cash += float(row['amount'] or 0)
+                snapshots.append({
+                    'portfolio_name': self.portfolio_name,
+                    'date': row['date'].strftime('%Y%m%d'),
+                    'total_value': cash,
+                    'cash': cash,
+                    'investment_value': 0.0,
+                })
+            self.db.executemany(
+                "INSERT OR REPLACE INTO portfolio_snapshots (portfolio_name, date, total_value, cash, investment_value) VALUES (?, ?, ?, ?, ?)",
+                [(s['portfolio_name'], s['date'], s['total_value'], s['cash'], s['investment_value']) for s in snapshots]
+            )
+            return len(snapshots)
 
-        # 边界日期
-        all_dates = sorted(list({t['date'] for t in trades}))
-        s_date = start_date or all_dates[0]
+        # 边界日期（考虑交易与现金流）
+        all_trd_dates = sorted(list({t['date'] for t in trades}))
+        flows = self.get_cash_flows()
+        all_flow_dates = sorted(list({f['date'] for f in flows})) if flows else []
+        earliest = min([d for d in (all_trd_dates[:1] + all_flow_dates[:1]) if d]) if (all_trd_dates or all_flow_dates) else None
+        if earliest is None:
+            return 0
+        s_date = start_date or earliest
         e_date = end_date or datetime.now().strftime('%Y%m%d')
 
-        # 初始现金
+        # 初始现金（基于现金流累加，不再取当前现金）
         initial_cash = 0.0
-        row = self.db.fetch_one("SELECT cost FROM portfolio WHERE portfolio_name = ? AND ts_code = 'CASH'", (self.portfolio_name,))
-        if row:
-            initial_cash = float(row['cost'] or 0)
+        if flows:
+            for f in flows:
+                if f['date'] <= s_date:
+                    initial_cash += float(f.get('amount') or 0)
 
         # 收集涉及的股票与价格数据
         tickers = sorted(list({t['ts_code'] for t in trades}))
@@ -280,12 +349,23 @@ class PortfolioManager:
         trades_df = pd.DataFrame(trades)
         trades_df['date'] = pd.to_datetime(trades_df['date'])
         trades_df = trades_df.sort_values('date')
+        flows_df = pd.DataFrame(flows or [])
+        if not flows_df.empty:
+            flows_df['date'] = pd.to_datetime(flows_df['date'])
+            flows_df = flows_df.sort_values('date')
 
         snapshots = []
+        t_idx = 0
+        f_idx = 0
         for current_date in dates:
-            # 应用当前日期的所有交易
-            today_trades = trades_df[trades_df['date'] == current_date]
-            for _, tr in today_trades.iterrows():
+            # 先应用所有现金流（日期<=当前日期且尚未应用）
+            if not flows_df.empty:
+                while f_idx < len(flows_df) and flows_df.iloc[f_idx]['date'] <= current_date:
+                    cash += float(flows_df.iloc[f_idx]['amount'] or 0.0)
+                    f_idx += 1
+            # 再应用所有交易（日期<=当前日期且尚未应用）
+            while t_idx < len(trades_df) and trades_df.iloc[t_idx]['date'] <= current_date:
+                tr = trades_df.iloc[t_idx]
                 if tr['side'] == 'buy':
                     cash -= tr['price'] * tr['qty'] + (tr['fee'] or 0)
                     pos[tr['ts_code']] += tr['qty']
@@ -294,6 +374,7 @@ class PortfolioManager:
                     pos[tr['ts_code']] -= tr['qty']
                     if abs(pos[tr['ts_code']]) < 1e-9:
                         pos[tr['ts_code']] = 0.0
+                t_idx += 1
 
             # 估算市值
             row_prices = prices_pivot.loc[current_date]
@@ -331,6 +412,18 @@ class PortfolioManager:
             df['date'] = pd.to_datetime(df['date'])
             df.set_index('date', inplace=True)
         return df
+
+    def get_last_snapshot_date(self) -> Optional[str]:
+        row = self.db.fetch_one(
+            "SELECT MAX(date) AS max_date FROM portfolio_snapshots WHERE portfolio_name = ?",
+            (self.portfolio_name,)
+        )
+        return row['max_date'] if row and row.get('max_date') else None
+
+    def rebuild_snapshots_incremental(self) -> int:
+        """基于最后一条快照日期增量更新；若没有则全量重建。"""
+        last = self.get_last_snapshot_date()
+        return self.rebuild_snapshots(start_date=last)
 
     def generate_portfolio_report(self) -> Dict[str, Any]:
         if not self.is_initialized():

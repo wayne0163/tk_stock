@@ -175,12 +175,24 @@ class Database:
         )
         ''')
 
+        # Cash flow records for deposits/withdrawals (for NAV reconstruction and annotations)
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS cash_flows (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            portfolio_name TEXT,
+            date TEXT,
+            amount REAL,
+            note TEXT
+        )
+        ''')
+
         # Indexes for performance
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_price ON daily_price(ts_code, date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_index_daily_price ON index_daily_price(ts_code, date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_watchlist_ts ON watchlist(ts_code)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_index_watchlist_ts ON index_watchlist(ts_code)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots ON portfolio_snapshots(portfolio_name, date)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_cash_flows ON cash_flows(portfolio_name, date)')
 
         self.conn.commit()
 
