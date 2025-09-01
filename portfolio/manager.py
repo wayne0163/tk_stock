@@ -286,7 +286,6 @@ class PortfolioManager:
             if not flows:
                 return 0
             # 构造仅现金的快照（用现金流日期近似作为时间轴）
-            import pandas as pd
             fdf = pd.DataFrame(flows)
             fdf['date'] = pd.to_datetime(fdf['date'])
             fdf = fdf.sort_values('date')

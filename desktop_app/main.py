@@ -3,7 +3,7 @@ import json
 import sys
 import threading
 from datetime import datetime
-from tkinter import Tk, StringVar, IntVar, BooleanVar, END, messagebox, filedialog, Toplevel, Menu
+from tkinter import Tk, StringVar, IntVar, BooleanVar, END, messagebox, filedialog, Toplevel, Menu, Text
 from tkinter import simpledialog
 from tkinter import ttk
 
@@ -1925,6 +1925,11 @@ class SystemStatsTab(ttk.Frame):
         dbf.pack(fill='x', padx=10, pady=(6, 10))
         ttk.Label(dbf, textvariable=self.vars['db']).pack(anchor='w', padx=8, pady=2)
 
+        # 底部操作区：系统功能说明按钮
+        bottom = ttk.Frame(self)
+        bottom.pack(fill='x', padx=10, pady=(0, 10))
+        ttk.Button(bottom, text='系统功能说明', command=self.show_system_overview).pack(side='right')
+
         self.refresh_stats()
 
     def refresh_stats(self):
@@ -1986,6 +1991,63 @@ class SystemStatsTab(ttk.Frame):
         except Exception as e:
             self.status.set('系统统计刷新失败')
             messagebox.showerror('错误', str(e))
+
+    def show_system_overview(self):
+        try:
+            # 文档路径
+            doc_path = os.path.abspath(os.path.join(PROJECT_ROOT, 'docs', 'system_architecture.md'))
+            content = ''
+            if os.path.exists(doc_path):
+                with open(doc_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            else:
+                content = (
+                    '未找到文档：docs/system_architecture.md\n\n'
+                    '请确认仓库中存在该文件，或在 readme.md 中查看总体说明。'
+                )
+
+            win = Toplevel(self)
+            win.title('系统功能说明')
+            win.geometry('780x560')
+            frm = ttk.Frame(win)
+            frm.pack(fill='both', expand=True, padx=10, pady=10)
+
+            # 滚动文本区
+            txt = Text(frm, wrap='word')
+            vsb = ttk.Scrollbar(frm, orient='vertical', command=txt.yview)
+            txt.configure(yscrollcommand=vsb.set)
+            txt.pack(side='left', fill='both', expand=True)
+            vsb.pack(side='right', fill='y')
+            try:
+                txt.insert('1.0', content)
+                txt.configure(state='disabled')
+            except Exception:
+                pass
+
+            # 操作区
+            btn_row = ttk.Frame(win)
+            btn_row.pack(fill='x', padx=10, pady=(6, 10))
+            def open_doc():
+                path = os.path.abspath(os.path.join(PROJECT_ROOT, 'docs', 'system_architecture.md'))
+                if os.path.exists(path):
+                    try:
+                        if sys.platform.startswith('darwin'):
+                            subprocess.call(['open', path])
+                        elif os.name == 'nt':
+                            os.startfile(path)
+                        else:
+                            subprocess.call(['xdg-open', path])
+                    except Exception:
+                        messagebox.showinfo('提示', f'文档路径：{path}')
+                else:
+                    messagebox.showinfo('提示', '未找到文档文件')
+            ttk.Button(btn_row, text='在系统中打开文档', command=open_doc).pack(side='left')
+            ttk.Button(btn_row, text='关闭', command=win.destroy).pack(side='right')
+        except Exception as e:
+            try:
+                messagebox.showerror('错误', str(e))
+            except Exception:
+                pass
 
 
 class BacktestTab(ttk.Frame):
