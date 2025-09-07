@@ -18,6 +18,20 @@
       "vol_ma_short": 3,
       "vol_ma_long": 18,
       "signal_valid_days": 3
+    },
+    "WeeklyMACDFilterStrategy": {
+      "signal_valid_days": 5
+    },
+    "SixRulesStrategy": {
+      "n_box": 28,
+      "vol_break_mult": 2.0,
+      "vol_spike_mult": 10.0,
+      "ema_len": 20,
+      "red_soldiers_len": 3,
+      "doji_amplitude_max": 0.03,
+      "stop_loss_pct": 0.03,
+      "risk_reward_min": 3.0,
+      "swing_lookback": 10
     }
   }
 }

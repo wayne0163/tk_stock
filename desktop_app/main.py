@@ -1,4 +1,5 @@
 import os
+import csv
 import json
 import sys
 import threading
@@ -282,6 +283,10 @@ class WatchlistFrame(ttk.Frame):
             ttk.Button(action_frame, text='选中移出回测池', command=self.remove_from_pool).pack(side='left', padx=8)
         ttk.Button(action_frame, text='删除选中项', command=self.delete_selected).pack(side='left', padx=(0, 8))
         ttk.Button(action_frame, text=f'清空所有{self.type_name}', command=self.clear_all).pack(side='left')
+        # 导出功能
+        ttk.Button(action_frame, text='导出为CSV...', command=self.export_csv).pack(side='left', padx=(16, 0))
+        if self.is_index:
+            ttk.Button(action_frame, text='保存为常用指数.csv', command=self.export_to_common_indices).pack(side='left', padx=8)
 
         self.refresh()
 
@@ -427,6 +432,71 @@ class WatchlistFrame(ttk.Frame):
         self.app.db.execute(f"DELETE FROM {self.table_name}")
         self.status.set(f"已清空所有自选{self.type_name}。")
         self.refresh()
+
+    def export_csv(self):
+        try:
+            if self.is_index:
+                rows = self.app.db.fetch_all(
+                    f"SELECT ts_code, name, in_pool FROM {self.table_name} ORDER BY ts_code"
+                )
+                path = filedialog.asksaveasfilename(
+                    title='导出自选指数为CSV',
+                    defaultextension='.csv',
+                    initialfile='index_watchlist.csv',
+                    filetypes=[('CSV 文件', '*.csv')]
+                )
+                if not path:
+                    return
+                with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['ts_code', 'name', 'in_pool'])
+                    for r in rows:
+                        writer.writerow([r.get('ts_code'), r.get('name'), int(r.get('in_pool') or 0)])
+                self.status.set(f'已导出自选指数到 {path}')
+            else:
+                # 导出股票：包含 symbol 便于再次导入
+                rows = self.app.db.fetch_all(
+                    """
+                    SELECT w.ts_code, COALESCE(s.symbol, '') AS symbol, w.name, COALESCE(w.in_pool,0) AS in_pool
+                    FROM watchlist w LEFT JOIN stocks s ON w.ts_code = s.ts_code
+                    ORDER BY w.ts_code
+                    """
+                )
+                path = filedialog.asksaveasfilename(
+                    title='导出自选股票为CSV',
+                    defaultextension='.csv',
+                    initialfile='stock_watchlist.csv',
+                    filetypes=[('CSV 文件', '*.csv')]
+                )
+                if not path:
+                    return
+                with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['symbol', 'ts_code', 'name', 'in_pool'])
+                    for r in rows:
+                        writer.writerow([r.get('symbol'), r.get('ts_code'), r.get('name'), int(r.get('in_pool') or 0)])
+                self.status.set(f'已导出自选股票到 {path}')
+        except Exception as e:
+            messagebox.showerror('导出失败', str(e))
+
+    def export_to_common_indices(self):
+        if not self.is_index:
+            return
+        try:
+            rows = self.app.db.fetch_all(
+                f"SELECT ts_code FROM {self.table_name} ORDER BY ts_code"
+            )
+            outdir = os.path.abspath(os.path.join(PROJECT_ROOT, 'data'))
+            os.makedirs(outdir, exist_ok=True)
+            path = os.path.join(outdir, '常用指数.csv')
+            with open(path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(['ts_code'])
+                for r in rows:
+                    writer.writerow([r.get('ts_code')])
+            self.status.set(f'已保存为常用指数.csv：{path}')
+        except Exception as e:
+            messagebox.showerror('导出失败', str(e))
 
     # ------ Xueqiu helpers ------
     def show_xueqiu_help(self):
@@ -1253,6 +1323,7 @@ class StrategyTab(ttk.Frame):
             self.strategy_combo.current(0)
         self.strategy_combo.pack(side='left', padx=8)
         ttk.Button(top, text='开始选股', command=self.run_screening).pack(side='left')
+        ttk.Button(top, text='策略说明', command=self.show_strategy_info).pack(side='left', padx=6)
 
         # Dynamic parameter panel for selected strategy
         self.param_frame = ttk.LabelFrame(self, text='策略参数')
@@ -1360,6 +1431,18 @@ class StrategyTab(ttk.Frame):
             specs = {
                 'signal_valid_days': ('周线信号有效天数', int, 3),
             }
+        elif name == 'SixRulesStrategy':
+            specs = {
+                'n_box': ('箱体窗口N', int, 28),
+                'vol_break_mult': ('突破量倍数(相对昨量)', float, 2.0),
+                'vol_spike_mult': ('异常放量倍数', float, 10.0),
+                'ema_len': ('EMA周期', int, 20),
+                'red_soldiers_len': ('红三兵长度', int, 3),
+                'doji_amplitude_max': ('十字星振幅上限', float, 0.03),
+                'stop_loss_pct': ('止损比例(%)', float, 0.03),
+                'risk_reward_min': ('最小盈亏比', float, 3.0),
+                'swing_lookback': ('结构低点窗口', int, 10),
+            }
         return specs
 
     def _rebuild_param_form(self):
@@ -1442,6 +1525,53 @@ class StrategyTab(ttk.Frame):
         _params_storage_save(store)
         self._saved_params_store = store
         self.status.set('策略参数已保存为默认')
+
+    def show_strategy_info(self):
+        name = self.strategy_var.get() or ''
+        if not name:
+            messagebox.showinfo('提示', '尚未选择策略')
+            return
+        txt = self._strategy_description_text(name)
+        win = Toplevel(self)
+        win.title(f'{name} 策略说明')
+        frm = ttk.Frame(win)
+        frm.pack(fill='both', expand=True, padx=12, pady=12)
+        lbl = ttk.Label(frm, text=txt, justify='left', anchor='w')
+        lbl.configure(wraplength=680)
+        lbl.pack(fill='both', expand=True)
+        ttk.Button(frm, text='关闭', command=win.destroy).pack(anchor='e', pady=(8, 0))
+
+    def _strategy_description_text(self, name: str) -> str:
+        if name == 'SixRulesStrategy':
+            return (
+                '六条铁律（日线）：\n\n'
+                '核心功能：\n'
+                '1) 箱体放量突破（LONG_BREAKOUT_CONFIRMED）：突破近N日上沿，且量能≥昨量×倍数；并且价格连续两日站上EMA20。\n'
+                '2) 真底部缩量十字星（BOTTOM_SCALE_IN）：振幅小于阈值、缩量、实体很小的信号。\n'
+                '3) 风险提示：箱体跌破、急涨长上影、假反弹红三兵、异常放量观察（不触发买入）。\n\n'
+                '回测实现：\n'
+                '- 买入：当日收盘触发(上两类买入信号)按收盘成交。\n'
+                '- 卖出：MA30跌破（通用退出）、止损价、止盈价。止损= min(结构低点/固定比例)，止盈=止损×最小盈亏比。\n\n'
+                '可调参数与影响：\n'
+                '- 箱体窗口N(n_box)：越大越严格，突破更难但质量更高。\n'
+                '- 突破量倍数(vol_break_mult)：越大越保守，选股更少但信号更强。\n'
+                '- EMA周期(ema_len)：越大越慢，降低噪音但滞后增加。\n'
+                '- 十字星振幅上限(doji_amplitude_max)：越小越苛刻，底部信号更少。\n'
+                '- 止损比例(stop_loss_pct) 与 最小盈亏比(risk_reward_min)：直接决定SL/TP，偏小/偏大将显著影响胜率与盈亏比。\n'
+                '- 结构低点窗口(swing_lookback)：越大SL越宽，容忍度更高但风险更大。\n'
+            )
+        elif name == 'FiveStepStrategy':
+            return (
+                'FiveStep：MA240上升 + 240日价差阈值 + 短均线趋势 + 放量 + RSI过滤；\n'
+                '买入按收盘，跌破MA30卖出。参数影响：长短周期、量倍数与RSI阈值将决定动量与筛选严格度。'
+            )
+        elif name == 'WeeklyMACDFilterStrategy':
+            return (
+                '周线MACD（金叉+区间+低分位）确认趋势，日线价量过滤；\n'
+                '买入按收盘，跌破SMA20卖出。参数影响：信号有效期决定周线触发后的持效期。'
+            )
+        else:
+            return '该策略暂无详细说明。'
 
     def _fill_results(self, rows):
         for item in self.tree.get_children():
@@ -1597,10 +1727,12 @@ class IndexCompareTab(ttk.Frame):
         ttk.Label(top, text='起始(YYYYMMDD)：').pack(side='left', padx=(12, 4))
         self.idx_start_var = StringVar(value='20240101')
         ttk.Entry(top, textvariable=self.idx_start_var, width=12).pack(side='left')
+        ttk.Button(top, text='年初', command=self._set_start_year_begin).pack(side='left', padx=(6, 0))
         ttk.Label(top, text='结束(YYYYMMDD)：').pack(side='left', padx=(12, 4))
         from datetime import date
         self.idx_end_var = StringVar(value=date.today().strftime('%Y%m%d'))
         ttk.Entry(top, textvariable=self.idx_end_var, width=12).pack(side='left')
+        ttk.Button(top, text='今日', command=self._set_end_today).pack(side='left', padx=(6, 0))
 
         # 进入页面将自动加载指数列表
 
@@ -1625,6 +1757,7 @@ class IndexCompareTab(ttk.Frame):
         ttk.Button(ctrl, text='开始对比', command=self.start_compare).pack(side='left')
         ttk.Button(ctrl, text='上一个', command=lambda: self._carousel(-1)).pack(side='left', padx=6)
         ttk.Button(ctrl, text='下一个', command=lambda: self._carousel(1)).pack(side='left')
+        ttk.Button(ctrl, text='功能说明', command=self.show_compare_help).pack(side='left', padx=8)
         self.curr_label = StringVar(value='')
         ttk.Label(ctrl, textvariable=self.curr_label).pack(side='left', padx=10)
 
@@ -1763,18 +1896,65 @@ class IndexCompareTab(ttk.Frame):
                 messagebox.showwarning('提示', '请先在列表中选择基准指数')
                 return
         code = self._candidates[self._pos]
+
+        # 自动调整起止日期至可比较区间：
+        # - 起始：若早于任一指数最早日期，自动提到交集最早日期；
+        # - 结束：使用两指数可用数据中的“最早的最新日期”（交集最晚日期）。
+        try:
+            base_bounds = self.app.db.fetch_one(
+                "SELECT MIN(date) AS min_d, MAX(date) AS max_d FROM index_daily_price WHERE ts_code = ?",
+                (base_code,)
+            ) or {}
+            code_bounds = self.app.db.fetch_one(
+                "SELECT MIN(date) AS min_d, MAX(date) AS max_d FROM index_daily_price WHERE ts_code = ?",
+                (code,)
+            ) or {}
+            bmin = (base_bounds.get('min_d') or '')
+            bmax = (base_bounds.get('max_d') or '')
+            cmin = (code_bounds.get('min_d') or '')
+            cmax = (code_bounds.get('max_d') or '')
+            if not bmin or not bmax or not cmin or not cmax:
+                messagebox.showwarning('提示', '所选指数数据不足，请先更新自选指数行情数据。')
+                return
+            inter_min = max(bmin, cmin)
+            inter_max = min(bmax, cmax)
+            # clamp start/end
+            if start > end:
+                messagebox.showwarning('提示', '起始日期不能晚于结束日期')
+                return
+            clamped_start = start if start >= inter_min else inter_min
+            clamped_end = end if end <= inter_max else inter_max
+            # 若无交集
+            if clamped_start > clamped_end:
+                base_name = (self.app.db.fetch_one("SELECT name FROM indices WHERE ts_code = ?", (base_code,)) or {}).get('name') or base_code
+                code_name = (self.app.db.fetch_one("SELECT name FROM indices WHERE ts_code = ?", (code,)) or {}).get('name') or code
+                messagebox.showwarning(
+                    '日期无交集',
+                    f'当前两指数在所选区间没有重叠数据。\n\n'
+                    f'基准 {base_name}({base_code})：可用 {bmin} ~ {bmax}\n'
+                    f'行业 {code_name}({code})：可用 {cmin} ~ {cmax}\n'
+                    f'建议将起始日期设置为 {inter_min}，结束日期设置为不晚于 {inter_max}。'
+                )
+                return
+        except Exception:
+            clamped_start, clamped_end = start, end
         try:
             self._start_busy('正在计算指数对比...')
             from analysis.market_comparison import compare_indices
-            df = compare_indices(self.app.db, base_code, code, start, end)
+            # 使用自动调整后的起止日期（若校验失败，则使用原输入）
+            try:
+                df = compare_indices(self.app.db, base_code, code, clamped_start, clamped_end)
+            except NameError:
+                df = compare_indices(self.app.db, base_code, code, start, end)
             self.ax.clear()
             if df is None or df.empty:
-                self.curr_label.set('数据不足或无法对齐')
+                self.status.set('指数对比：数据不足或无法对齐')
                 self.canvas.draw()
                 return
             # Plot ratio and MA
             indicators = ['ratio']
-            self.ax.plot(df['date'], df['ratio_c'], label='ratio')
+            # ratio 使用红色，其它指标使用默认颜色
+            self.ax.plot(df['date'], df['ratio_c'], label='ratio', color='red')
             if 'c_ma10' in df.columns:
                 self.ax.plot(df['date'], df['c_ma10'], label='MA10')
                 indicators.append('MA10')
@@ -1782,7 +1962,7 @@ class IndexCompareTab(ttk.Frame):
                 self.ax.plot(df['date'], df['c_ma20'], label='MA20')
                 indicators.append('MA20')
             if 'c_ma60' in df.columns:
-                self.ax.plot(df['date'], df['c_ma60'], label='MA60')
+                self.ax.plot(df['date'], df['c_ma60'], label='MA60', color='gray')
                 indicators.append('MA60')
             ind_text = ', '.join(indicators)
             # Display index names instead of codes in the chart title
@@ -1790,15 +1970,25 @@ class IndexCompareTab(ttk.Frame):
             code_row = self.app.db.fetch_one("SELECT name FROM indices WHERE ts_code = ?", (code,))
             base_name = (base_row or {}).get('name') or base_code
             code_name = (code_row or {}).get('name') or code
-            self.ax.set_title(f'{code_name}({code}) vs {base_name}({base_code}) | 指标: {ind_text}')
+            # 使用实际数据区间（已自动调整并对齐后）
+            try:
+                used_start = df['date'].iloc[0]
+                used_end = df['date'].iloc[-1]
+                used_start_s = used_start.strftime('%Y%m%d') if hasattr(used_start, 'strftime') else str(used_start)
+                used_end_s = used_end.strftime('%Y%m%d') if hasattr(used_end, 'strftime') else str(used_end)
+                range_text = f'区间: {used_start_s} ~ {used_end_s}'
+            except Exception:
+                range_text = ''
+            self.ax.set_title(f'{code_name}({code}) vs {base_name}({base_code}) | 指标: {ind_text}' + (f' | {range_text}' if range_text else ''))
             self.ax.set_xlabel('日期')
             self.ax.set_ylabel('比值')
             self.ax.legend()
             latest = df.iloc[-1]
             latest_date = latest['date'].strftime('%Y-%m-%d') if hasattr(latest['date'], 'strftime') else str(latest['date'])
             latest_ratio = latest['ratio_c']
-            # Also show names in the current label
-            self.curr_label.set(f'当前对比：{code_name}({code})（{self._pos+1}/{len(self._candidates)}） 截止{latest_date} 比值 {latest_ratio:.3f}')
+            # 状态栏显示：当前序号、最新日期与比值、实际对比区间
+            info_range = f' | {range_text}' if range_text else ''
+            self.status.set(f'指数对比：{code_name}({code}) vs {base_name}({base_code}) | 截止{latest_date} 比值 {latest_ratio:.3f} | {self._pos+1}/{len(self._candidates)}{info_range}')
             self.canvas.draw()
         except Exception as e:
             messagebox.showerror('错误', str(e))
@@ -1814,8 +2004,35 @@ class IndexCompareTab(ttk.Frame):
         start = self.idx_start_var.get().strip()
         end = self.idx_end_var.get().strip()
         try:
+            # 与绘图逻辑一致：自动将起止日期限定到对比交集区间
+            base_bounds = self.app.db.fetch_one(
+                "SELECT MIN(date) AS min_d, MAX(date) AS max_d FROM index_daily_price WHERE ts_code = ?",
+                (base_code,)
+            ) or {}
+            code_bounds = self.app.db.fetch_one(
+                "SELECT MIN(date) AS min_d, MAX(date) AS max_d FROM index_daily_price WHERE ts_code = ?",
+                (code,)
+            ) or {}
+            bmin = (base_bounds.get('min_d') or '')
+            bmax = (base_bounds.get('max_d') or '')
+            cmin = (code_bounds.get('min_d') or '')
+            cmax = (code_bounds.get('max_d') or '')
+            if not bmin or not bmax or not cmin or not cmax:
+                messagebox.showinfo('提示', '指数数据不足，无法导出。请先更新指数数据。')
+                return
+            inter_min = max(bmin, cmin)
+            inter_max = min(bmax, cmax)
+            if len(start) != 8 or not start.isdigit() or len(end) != 8 or not end.isdigit():
+                messagebox.showwarning('提示', '日期格式应为YYYYMMDD')
+                return
+            if start > end:
+                messagebox.showwarning('提示', '起始日期不能晚于结束日期')
+                return
+            clamped_start = start if start >= inter_min else inter_min
+            clamped_end = end if end <= inter_max else inter_max
+
             from analysis.market_comparison import compare_indices
-            df = compare_indices(self.app.db, base_code, code, start, end)
+            df = compare_indices(self.app.db, base_code, code, clamped_start, clamped_end)
             if df is None or df.empty:
                 messagebox.showinfo('提示', '当前没有可导出的数据')
                 return
@@ -1823,7 +2040,7 @@ class IndexCompareTab(ttk.Frame):
             outdir = os.path.abspath(os.path.join(PROJECT_ROOT, 'output'))
             os.makedirs(outdir, exist_ok=True)
             ts = time.strftime('%Y%m%d_%H%M%S')
-            filename = f'index_compare_{base_code}_vs_{code}_{start}_{end}_{ts}.csv'
+            filename = f'index_compare_{base_code}_vs_{code}_{clamped_start}_{clamped_end}_{ts}.csv'
             path = os.path.join(outdir, filename)
             df.to_csv(path, index=False, encoding='utf-8-sig')
             self.status.set(f'已导出指数对比数据：{path}')
@@ -1868,6 +2085,64 @@ class IndexCompareTab(ttk.Frame):
             self._busy_bar.stop()
             self._busy_frame.forget()
         self.after(0, stop)
+
+    def show_compare_help(self):
+        """显示指数对比功能说明弹窗。"""
+        try:
+            txt = (
+                '指数对比：功能与解读\n\n'
+                '用途：\n'
+                '  - 快速评估一个行业/主题指数相对于“基准指数”的强弱趋势。\n'
+                '  - 通过比值曲线与其MA10/20/60，观察相对趋势的方向、持续性与拐点。\n\n'
+                '实现方式：\n'
+                '  - 从本地SQLite读取所选指数与基准的日收盘价（index_daily_price）。\n'
+                '  - 以交易日对齐后，计算比值 ratio = 行业收盘价 / 基准收盘价。\n'
+                '  - 在比值上计算MA10/20/60并绘制。\n\n'
+                '如何阅读：\n'
+                '  - 比值上行：行业跑赢基准；比值下行：行业跑输基准。\n'
+                '  - 比值位于均线上方，且MA多头排列（MA10>MA20>MA60），代表相对强势更稳健。\n'
+                '  - 比值跌破均线、均线拐头向下或多头转为空头排列，提示相对优势减弱。\n'
+                '  - 起止日期与基准选择会影响结论，建议在不同窗口与不同基准下交叉验证。\n\n'
+                '局限性与注意：\n'
+                '  - 价格口径：默认使用价格指数收盘价，未进行股息再投资处理；若有“全收益”版本（如CNY010/CNY01标记），建议优先使用。\n'
+                '  - 未做风险调整：该图仅反映相对价格趋势，未考虑波动、公允价值或风险暴露差异。\n'
+                '  - 成分差异：不同行业/主题指数的编制方法、成分权重差异较大，横向比较需谨慎。\n'
+                '  - 数据完整性：节假日/停牌可能导致短期对齐缺失或噪声；请确保数据已更新。\n'
+                '  - 指标滞后：均线有滞后性，短周期（如MA10）易产生假突破；建议结合更长窗口与其它信号确认。\n\n'
+                '实务建议：\n'
+                '  - 将相对强弱与绝对趋势（行业自身MA、市场大盘趋势）结合评估。\n'
+                '  - 针对同一主题切换不同基准（如沪深300、全指、科技等）检验稳健性。\n'
+                '  - 结合基本面/事件驱动与估值指标，避免单一技术信号决策。\n'
+                '  - 使用“保存PNG/导出CSV”沉淀分析记录，便于复盘。\n'
+            )
+
+            win = Toplevel(self)
+            win.title('指数对比功能说明')
+            win.geometry('760x560')
+            frm = ttk.Frame(win)
+            frm.pack(fill='both', expand=True, padx=10, pady=10)
+
+            # 滚动文本区
+            text = Text(frm, wrap='word')
+            vsb = ttk.Scrollbar(frm, orient='vertical', command=text.yview)
+            text.configure(yscrollcommand=vsb.set)
+            text.pack(side='left', fill='both', expand=True)
+            vsb.pack(side='right', fill='y')
+            try:
+                text.insert('1.0', txt)
+                text.configure(state='disabled')
+            except Exception:
+                pass
+
+            # 关闭按钮
+            btn_row = ttk.Frame(win)
+            btn_row.pack(fill='x', padx=10, pady=(6, 10))
+            ttk.Button(btn_row, text='关闭', command=win.destroy).pack(side='right')
+        except Exception as e:
+            try:
+                messagebox.showerror('错误', str(e))
+            except Exception:
+                pass
 
 
 class SystemStatsTab(ttk.Frame):
@@ -2243,6 +2518,18 @@ class BacktestTab(ttk.Frame):
         elif name == 'WeeklyMACDFilterStrategy':
             specs = {
                 'signal_valid_days': ('周线信号有效天数', int, 3),
+            }
+        elif name == 'SixRulesStrategy':
+            specs = {
+                'n_box': ('箱体窗口N', int, 28),
+                'vol_break_mult': ('突破量倍数(相对昨量)', float, 2.0),
+                'vol_spike_mult': ('异常放量倍数', float, 10.0),
+                'ema_len': ('EMA周期', int, 20),
+                'red_soldiers_len': ('红三兵长度', int, 3),
+                'doji_amplitude_max': ('十字星振幅上限', float, 0.03),
+                'stop_loss_pct': ('止损比例(%)', float, 0.03),
+                'risk_reward_min': ('最小盈亏比', float, 3.0),
+                'swing_lookback': ('结构低点窗口', int, 10),
             }
         return specs
 
